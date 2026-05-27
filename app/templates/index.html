@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Minority Report — Recursive BRD Generator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+  <div class="scanlines"></div>
+
+  <header>
+    <div class="hud-bar">
+      <span class="dot"></span>
+      <span>SYSTEM ONLINE</span>
+      <span class="divider"></span>
+      <span id="hudClock">--:--:--</span>
+    </div>
+    <h1>Minority Report</h1>
+    <p class="tag">// Recursive BRD generator — brainstorm × premortem × strategic input × VC consideration</p>
+  </header>
+
+  <main>
+    <section class="intake" id="intake">
+      <label for="idea">// Business idea</label>
+      <textarea id="idea" rows="6" placeholder="e.g. A subscription service that ships a curated box of locally-roasted coffee beans to office break rooms, with usage-based reorder."></textarea>
+
+      <div class="iter-row">
+        <label for="maxIterations">// Max iterations</label>
+        <input type="number" id="maxIterations" min="1" max="20" value="5" />
+        <span class="hint">Loop stops earlier if green-lit (score ≥ 80, zero red flags). Otherwise runs this many rounds, then publishes the best draft.</span>
+      </div>
+
+      <button id="processBtn">Process this idea</button>
+    </section>
+
+    <section class="run hidden" id="run">
+      <div class="status" id="status">Connecting…</div>
+      <div id="iterations"></div>
+
+      <div class="pause-panel hidden" id="pausePanel">
+        <h3>Your turn — strategic check-in</h3>
+        <p class="hint" id="pauseSubtitle"></p>
+        <ol id="pauseIssues" class="pause-issues"></ol>
+        <label for="guidance">// Strategic guidance — binding, overrides premortem flags on conflict</label>
+        <textarea id="guidance" rows="5" placeholder="e.g. Drop the calendar integration entirely — it's not core. Decide on a paid-only model. Use Postgres, not DynamoDB."></textarea>
+        <div class="pause-actions">
+          <button id="continueBtn">Continue with guidance</button>
+          <button id="skipBtn" class="secondary">Skip & continue</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="final hidden" id="final">
+      <div id="finalBanner"></div>
+      <h2>Final BRD <span class="score" id="finalScore"></span></h2>
+      <div id="finalBrd" class="brd"></div>
+
+      <details open id="evolutionDetails" class="evolution">
+        <summary>// Evolution report — what improved the BRD from v1 to final</summary>
+        <div id="evolutionReport" class="brd"></div>
+      </details>
+
+      <details>
+        <summary>// Final premortem detail</summary>
+        <div id="finalPremortem"></div>
+      </details>
+
+      <section class="vc-section hidden" id="vcSection">
+        <h2>VC Consideration</h2>
+        <p class="hint" id="vcStatus">Matching top VCs…</p>
+        <div id="vcConsensus" class="vc-consensus"></div>
+        <div id="vcMemos" class="vc-memos"></div>
+      </section>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls /var/folders/3p/04vgn6jn0fl6l5jpmk8m1kw80000gq/T/tmp.3D8cTEdxMQ/etna/skills/ 2>&1 | head -50)",
+      "Read(//private/var/folders/3p/04vgn6jn0fl6l5jpmk8m1kw80000gq/T/tmp.3D8cTEdxMQ/etna/skills/**)",
+      "Bash(mkdir -p \"/Users/abhimanyus/Documents/Projects/Project 3 - Minority Report/.claude/skills\")",
+      "Bash(cp -R /var/folders/3p/04vgn6jn0fl6l5jpmk8m1kw80000gq/T/tmp.3D8cTEdxMQ/etna/skills/technical-brainstorm \"/Users/abhimanyus/Documents/Projects/Project 3 - Minority Report/.claude/skills/\")",
+      "Bash(rm -rf /var/folders/3p/04vgn6jn0fl6l5jpmk8m1kw80000gq/T/tmp.3D8cTEdxMQ)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8000/)",
+      "Bash(curl -sN --max-time 240 \"http://localhost:8000/process?idea=A%20local%20cron-style%20app%20that%20reminds%20me%20to%20drink%20water%20every%20hour%20via%20a%20Mac%20notification.\")",
+      "Bash(open http://localhost:8000/)",
+      "Bash(gh auth *)",
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(git rm *)",
+      "Bash(grep -E \"^\\\\.env$\")"
+    ],
+    "additionalDirectories": [
+      "/private/var/folders/3p/04vgn6jn0fl6l5jpmk8m1kw80000gq/T/tmp.3D8cTEdxMQ"
+    ]
+  }
+}
