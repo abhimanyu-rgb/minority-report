@@ -34,6 +34,13 @@ const pauseIssues = $("pauseIssues");
 const guidanceEl = $("guidance");
 const continueBtn = $("continueBtn");
 const skipBtn = $("skipBtn");
+const timerRing = $("timerRing");
+const ringProgress = $("ringProgress");
+const ringLabel = $("ringLabel");
+
+const RING_CIRCUMFERENCE = 163.36;  // 2*pi*26
+let countdownInterval = null;
+let userEdited = false;  // whether the user has typed in the guidance textarea
 
 function scoreClass(s) {
   if (s >= 80) return "high";
@@ -51,7 +58,7 @@ function ensureIterCard(n) {
   card.className = "iter";
   card.innerHTML = `
     <div class="iter-header" data-n="${n}">
-      <span>Iteration ${n}</span>
+      <span>Iteration ${n} <span class="iter-id-chip"></span></span>
       <span class="iter-meta"></span>
     </div>
     <div class="iter-body">
@@ -66,6 +73,22 @@ function ensureIterCard(n) {
   });
   iterCards[n] = card;
   return card;
+}
+
+function setIterId(n, iterationId) {
+  const card = ensureIterCard(n);
+  const chip = card.querySelector(".iter-id-chip");
+  if (chip && iterationId && !chip.textContent) {
+    chip.textContent = iterationId;
+    chip.title = "iteration_id (click to copy)";
+    chip.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      navigator.clipboard?.writeText(iterationId);
+      const prev = chip.textContent;
+      chip.textContent = "copied";
+      setTimeout(() => { chip.textContent = prev; }, 900);
+    });
+  }
 }
 
 function renderFlags(flags) {
@@ -178,8 +201,80 @@ function renderMemo(d) {
   $("vcMemos").appendChild(div);
 }
 
+function stopCountdown() {
+  if (countdownInterval) {
+    clearInterval(countdownInterval);
+    countdownInterval = null;
+  }
+}
+
+function hideTimerRing() {
+  timerRing.classList.add("hidden");
+  stopCountdown();
+}
+
+function startCountdown(seconds) {
+  stopCountdown();
+  userEdited = false;
+  timerRing.classList.remove("hidden", "expiring", "critical");
+  ringProgress.style.transition = "none";
+  ringProgress.style.strokeDashoffset = "0";
+  ringLabel.textContent = String(seconds);
+  // Force layout flush so the initial state paints before we animate.
+  void ringProgress.offsetWidth;
+  ringProgress.style.transition = "stroke-dashoffset 1s linear, stroke 0.3s";
+
+  let remaining = seconds;
+  const tick = () => {
+    remaining -= 1;
+    if (remaining < 0) {
+      stopCountdown();
+      // Auto-continue. The server will time out and treat as skip, but we proactively
+      // submit empty guidance so the UI advances cleanly.
+      if (currentRunId && !pausePanel.classList.contains("hidden")) {
+        submitGuidance("", { auto: true });
+      }
+      return;
+    }
+    const elapsedFrac = (seconds - remaining) / seconds;
+    ringProgress.style.strokeDashoffset = String(RING_CIRCUMFERENCE * elapsedFrac);
+    ringLabel.textContent = String(remaining);
+    if (remaining <= 5) {
+      timerRing.classList.remove("expiring");
+      timerRing.classList.add("critical");
+    } else if (remaining <= 15) {
+      timerRing.classList.add("expiring");
+    }
+  };
+  countdownInterval = setInterval(tick, 1000);
+}
+
+// Cancel the timer the moment the user starts typing.
+guidanceEl.addEventListener("input", () => {
+  if (guidanceEl.value.length > 0 && !userEdited) {
+    userEdited = true;
+    stopCountdown();
+    hideTimerRing();
+  }
+});
+
+async function refreshCosts() {
+  try {
+    const r = await fetch("/costs", { cache: "no-store" });
+    if (!r.ok) return;
+    const d = await r.json();
+    const t = d.totals_usd || {};
+    $("costToday").textContent = "$" + (t.today ?? 0).toFixed(2);
+    $("costWeek").textContent = "$" + (t.week ?? 0).toFixed(2);
+    $("costMonth").textContent = "$" + (t.month ?? 0).toFixed(2);
+  } catch {}
+}
+$("costStrip").addEventListener("click", refreshCosts);
+refreshCosts();
+setInterval(refreshCosts, 30000);
+
 function showPausePanel(d) {
-  pauseSubtitle.textContent = `Iteration ${d.n} scored ${d.score}. Review the top issues before iteration ${d.next_iteration}. Add binding strategic guidance, or skip to let the loop continue with premortem feedback alone.`;
+  pauseSubtitle.textContent = `Iteration ${d.n} scored ${d.score}. Review the top issues before iteration ${d.next_iteration}. Add binding strategic guidance, or skip. Auto-continues in ${d.timeout_s ?? 60}s if no input.`;
   pauseIssues.innerHTML = d.top_issues
     .map(
       (f) => `
@@ -197,16 +292,22 @@ function showPausePanel(d) {
   skipBtn.disabled = false;
   pausePanel.scrollIntoView({ behavior: "smooth" });
   setStatus(`Iteration ${d.n} complete. Waiting for your strategic guidance…`, false);
+  startCountdown(d.timeout_s ?? 60);
 }
 
 function hidePausePanel() {
   pausePanel.classList.add("hidden");
+  stopCountdown();
 }
 
-async function submitGuidance(text) {
+async function submitGuidance(text, opts = {}) {
   if (!currentRunId) return;
+  stopCountdown();
   continueBtn.disabled = true;
   skipBtn.disabled = true;
+  if (opts.auto) {
+    setStatus("Timer expired — auto-continuing with no guidance.", true);
+  }
   try {
     const resp = await fetch(`/resume/${encodeURIComponent(currentRunId)}`, {
       method: "POST",
@@ -293,7 +394,20 @@ function handlers() {
     },
     iteration_started: (d) => {
       ensureIterCard(d.n);
+      setIterId(d.n, d.iteration_id);
       setStatus(`Iteration ${d.n}: brainstorming…`);
+    },
+    iteration_cost: (d) => {
+      $("runCostVal").textContent = "$" + (d.run_cost_usd_so_far ?? 0).toFixed(4);
+      const card = ensureIterCard(d.n);
+      let costNote = card.querySelector(".iter-cost-note");
+      if (!costNote) {
+        costNote = document.createElement("div");
+        costNote.className = "iter-cost-note hint";
+        costNote.style.marginTop = "0.4rem";
+        card.querySelector(".iter-body").appendChild(costNote);
+      }
+      costNote.textContent = `Iteration cost: $${(d.iteration_cost_usd ?? 0).toFixed(4)} · run so far: $${(d.run_cost_usd_so_far ?? 0).toFixed(4)}`;
     },
     brainstorm_started: (d) => {
       const card = ensureIterCard(d.n);
@@ -341,12 +455,15 @@ function handlers() {
       finalBrd.innerHTML = marked.parse(d.brd);
       finalPremortem.innerHTML =
         `<p>${escapeHtml(d.premortem.summary)}</p>` + renderFlags(d.premortem.flags);
-      setStatus(`Done. ${d.total_iterations} iteration(s). Run id: ${d.run_id}.`, false);
+      const totalCost = d.cost_usd ?? 0;
+      $("runCostVal").textContent = "$" + totalCost.toFixed(4);
+      setStatus(`Done. ${d.total_iterations} iteration(s). Total cost $${totalCost.toFixed(4)}. Run id: ${d.run_id}.`, false);
       btn.disabled = false;
       btn.textContent = "Process this idea";
       if (es) { es.close(); es = null; }
       hidePausePanel();
       finalEl.scrollIntoView({ behavior: "smooth" });
+      refreshCosts();  // pull updated totals into the HUD strip
     },
     error: (d) => {
       setStatus(`Error: ${d.message}`, false);
@@ -377,6 +494,7 @@ btn.addEventListener("click", () => {
   $("vcSection").classList.add("hidden");
   $("vcMemos").innerHTML = "";
   $("vcConsensus").innerHTML = "";
+  $("runCostVal").textContent = "$0.0000";
   runEl.classList.remove("hidden");
   setStatus("Connecting…");
   btn.disabled = true;

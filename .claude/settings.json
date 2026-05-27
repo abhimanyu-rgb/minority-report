@@ -13,7 +13,17 @@
       "Bash(git init *)",
       "Bash(git add *)",
       "Bash(git rm *)",
-      "Bash(grep -E \"^\\\\.env$\")"
+      "Bash(grep -E \"^\\\\.env$\")",
+      "Bash(git commit -m ' *)",
+      "Bash(gh repo *)",
+      "Bash(curl -sN --max-time 240 \"http://localhost:8000/process?idea=A%20local%20Mac%20app%20that%20pops%20a%20notification%20every%2060%20minutes%20to%20remind%20me%20to%20stretch.&max_iterations=1\")",
+      "Bash(python3 -c \"import sys, json; [print\\(json.loads\\(l\\)['type']\\) for l in sys.stdin]\")",
+      "Bash(curl -sN --max-time 600 \"http://localhost:8000/process?idea=A%20local%20Mac%20app%20that%20pops%20a%20notification%20every%2060%20minutes%20to%20stretch.&max_iterations=1\")",
+      "Bash(tee /tmp/events.txt)",
+      "Read(//tmp/**)",
+      "Bash(curl -s http://localhost:8000/costs)",
+      "Bash(python3 -m json.tool)",
+      "Bash(curl -sN --max-time 480 \"http://localhost:8000/process?idea=A%20Mac%20menubar%20app%20that%20tracks%20active%20focus%20sessions%20and%20gives%20a%20weekly%20report.&max_iterations=2\")"
     ],
     "additionalDirectories": [
       "/private/var/folders/3p/04vgn6jn0fl6l5jpmk8m1kw80000gq/T/tmp.3D8cTEdxMQ"

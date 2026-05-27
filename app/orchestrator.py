@@ -39,11 +39,18 @@ from .prompts import (
 VC_PROFILES_PATH = Path(__file__).resolve().parent / "data" / "vc_profiles.json"
 
 # Callable the HTTP layer injects to pause the loop between iterations.
-# Returns the user's guidance text (empty string == skip).
-GuidanceFn = Callable[[int, list[dict]], Awaitable[str]]
+# Receives (iteration_number, top_issues, timeout_seconds). Returns the user's
+# guidance text. Empty string == user skipped. Auto-skip on timeout returns "".
+GuidanceFn = Callable[[int, list[dict], int], Awaitable[str]]
 
-BRAINSTORM_MODEL = os.getenv("BRAINSTORM_MODEL", "claude-sonnet-4-6")
-PREMORTEM_MODEL = os.getenv("PREMORTEM_MODEL", "claude-sonnet-4-6")
+# Seconds to wait at strategic check-in before auto-continuing with no guidance.
+GUIDANCE_TIMEOUT_S = int(os.getenv("GUIDANCE_TIMEOUT_S", "60"))
+
+from .models_cfg import MODELS, Usage, usage_from_response
+
+# Back-compat aliases (still referenced in some metadata writes).
+BRAINSTORM_MODEL = MODELS["brainstorm"]
+PREMORTEM_MODEL = MODELS["premortem"]
 DEFAULT_MAX_ITERATIONS = int(os.getenv("MAX_ITERATIONS", "5"))
 SCORE_THRESHOLD = int(os.getenv("SCORE_THRESHOLD", "80"))
 
@@ -82,13 +89,51 @@ class Premortem:
 @dataclass
 class Iteration:
     n: int
+    iteration_id: str
     brd: str
     premortem: Premortem
     user_guidance_after: str = ""  # guidance the user provided AFTER this iteration's premortem
+    brainstorm_started_at: str = ""
+    brainstorm_finished_at: str = ""
+    premortem_started_at: str = ""
+    premortem_finished_at: str = ""
+    brainstorm_model: str = ""
+    premortem_model: str = ""
+    user_guidance_used: str = ""  # guidance applied INTO this iteration's brainstorm (from previous round)
+    usages: list[dict] = field(default_factory=list)  # per-call usage records (model + tokens + cost)
+    cost_usd: float = 0.0
 
 
 def _event(type_: str, **data) -> dict:
     return {"event": type_, "data": data}
+
+
+def _now_iso() -> str:
+    return datetime.utcnow().isoformat(timespec="microseconds") + "Z"
+
+
+def _new_iteration_id(run_id: str, n: int) -> str:
+    return f"{run_id}-i{n:02d}-{uuid.uuid4().hex[:6]}"
+
+
+class RunLogger:
+    """Append-only NDJSON event log for a run. Never rewrites."""
+
+    def __init__(self, run_dir: Path) -> None:
+        self.path = run_dir / "events.ndjson"
+        # Open in append mode so we never overwrite prior events.
+        self._fh = self.path.open("a", encoding="utf-8")
+
+    def write(self, type_: str, data: dict) -> None:
+        record = {"ts": _now_iso(), "type": type_, "data": data}
+        self._fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self._fh.flush()
+
+    def close(self) -> None:
+        try:
+            self._fh.close()
+        except Exception:
+            pass
 
 
 def _extract_json(text: str) -> dict:
@@ -134,23 +179,25 @@ class Orchestrator:
     def __init__(self) -> None:
         self.client = AsyncAnthropic()
 
-    async def _brainstorm(self, user_msg: str) -> str:
+    async def _brainstorm(self, user_msg: str) -> tuple[str, Usage]:
+        model = MODELS["brainstorm"]
         resp = await self.client.messages.create(
-            model=BRAINSTORM_MODEL,
+            model=model,
             max_tokens=8000,
             system=BRAINSTORM_SYSTEM,
             messages=[{"role": "user", "content": user_msg}],
         )
-        return resp.content[0].text
+        return resp.content[0].text, usage_from_response(model, resp)
 
-    async def _vc_match(self, brd: str, vc_db: list[dict]) -> list[dict]:
+    async def _vc_match(self, brd: str, vc_db: list[dict]) -> tuple[list[dict], Usage]:
+        model = MODELS["vc_match"]
         # Strip heavy fields the matcher does not need.
         compact = [
             {k: v for k, v in p.items() if k in ("id", "firm", "thesis", "what_they_fund", "sectors", "stage_focus")}
             for p in vc_db
         ]
         resp = await self.client.messages.create(
-            model=PREMORTEM_MODEL,
+            model=model,
             max_tokens=1500,
             system=VC_MATCH_SYSTEM,
             messages=[{
@@ -160,7 +207,6 @@ class Orchestrator:
         )
         data = _extract_json(resp.content[0].text)
         matches = data.get("matches", [])
-        # Resolve ids -> full profiles, preserving reason.
         by_id = {p["id"]: p for p in vc_db}
         resolved = []
         for m in matches[:3]:
@@ -168,11 +214,12 @@ class Orchestrator:
             if profile is None:
                 continue
             resolved.append({"profile": profile, "reason": m.get("reason", "")})
-        return resolved
+        return resolved, usage_from_response(model, resp)
 
-    async def _vc_eval(self, brd: str, profile: dict, final_score: int, final_summary: str) -> dict:
+    async def _vc_eval(self, brd: str, profile: dict, final_score: int, final_summary: str) -> tuple[dict, Usage]:
+        model = MODELS["vc_eval"]
         resp = await self.client.messages.create(
-            model=PREMORTEM_MODEL,
+            model=model,
             max_tokens=3000,
             system=VC_EVAL_SYSTEM.format(profile=json.dumps(profile, indent=2)),
             messages=[{
@@ -182,9 +229,9 @@ class Orchestrator:
                 ),
             }],
         )
-        return _extract_json(resp.content[0].text)
+        return _extract_json(resp.content[0].text), usage_from_response(model, resp)
 
-    async def _vc_consensus(self, memos: list[dict]) -> dict:
+    async def _vc_consensus(self, memos: list[dict]) -> tuple[dict, Usage]:
         # Strip massive fields, keep firm + verdict + valuations + key memo bullets.
         compact = []
         for m in memos:
@@ -201,8 +248,9 @@ class Orchestrator:
                 "deal_breakers": m["eval"]["memo"]["deal_breakers"],
                 "valuation_rationale": m["eval"]["memo"]["valuation_rationale"],
             })
+        model = MODELS["vc_consensus"]
         resp = await self.client.messages.create(
-            model=PREMORTEM_MODEL,
+            model=model,
             max_tokens=1500,
             system=VC_CONSENSUS_SYSTEM,
             messages=[{
@@ -210,9 +258,9 @@ class Orchestrator:
                 "content": VC_CONSENSUS_USER.format(memos_block=json.dumps(compact, indent=2)),
             }],
         )
-        return _extract_json(resp.content[0].text)
+        return _extract_json(resp.content[0].text), usage_from_response(model, resp)
 
-    async def _evolution_report(self, idea: str, iterations: list[Iteration], final: Iteration) -> str:
+    async def _evolution_report(self, idea: str, iterations: list[Iteration], final: Iteration) -> tuple[str, Usage]:
         blocks: list[str] = []
         for it in iterations:
             blocks.append(f"### Iteration {it.n}")
@@ -234,8 +282,9 @@ class Orchestrator:
             blocks.append("")
         history_block = "\n".join(blocks)
 
+        model = MODELS["evolution"]
         resp = await self.client.messages.create(
-            model=BRAINSTORM_MODEL,
+            model=model,
             max_tokens=4000,
             system=EVOLUTION_SYSTEM,
             messages=[{
@@ -249,11 +298,12 @@ class Orchestrator:
                 ),
             }],
         )
-        return resp.content[0].text
+        return resp.content[0].text, usage_from_response(model, resp)
 
-    async def _premortem(self, brd: str) -> Premortem:
+    async def _premortem(self, brd: str) -> tuple[Premortem, Usage]:
+        model = MODELS["premortem"]
         resp = await self.client.messages.create(
-            model=PREMORTEM_MODEL,
+            model=model,
             max_tokens=4000,
             system=PREMORTEM_SYSTEM,
             messages=[{"role": "user", "content": PREMORTEM_USER.format(brd=brd)}],
@@ -261,12 +311,13 @@ class Orchestrator:
         raw = resp.content[0].text
         data = _extract_json(raw)
         flags = [Flag(**f) for f in data.get("flags", [])]
-        return Premortem(
+        premortem = Premortem(
             score=int(data["score"]),
             verdict=data.get("verdict", "needs-revision"),
             summary=data.get("summary", ""),
             flags=flags,
         )
+        return premortem, usage_from_response(model, resp)
 
     async def run(
         self,
@@ -277,162 +328,330 @@ class Orchestrator:
     ) -> AsyncIterator[dict]:
         max_iter = max(1, min(20, int(max_iterations if max_iterations is not None else DEFAULT_MAX_ITERATIONS)))
         run_dir = RUNS_DIR / run_id
+
+        # Hard refusal to overwrite an existing run.
+        if run_dir.exists() and any(run_dir.iterdir()):
+            raise RuntimeError(f"Run directory {run_dir} already exists and is non-empty; refusing to overwrite.")
         run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "iterations").mkdir(exist_ok=True)
         (run_dir / "idea.txt").write_text(idea)
 
-        yield _event("run_started", run_id=run_id, max_iterations=max_iter, threshold=SCORE_THRESHOLD)
+        logger = RunLogger(run_dir)
+        run_started_at = _now_iso()
 
+        # Helper that emits to SSE AND appends to the immutable NDJSON log.
+        def emit(type_: str, **data):
+            logger.write(type_, data)
+            return _event(type_, **data)
+
+        def record_usage(role: str, usage: Usage, iteration_id: str | None = None) -> dict:
+            """Add a usage record to run-level + iteration-level totals; return the dict."""
+            d = usage.to_dict()
+            d["role"] = role
+            if iteration_id:
+                d["iteration_id"] = iteration_id
+            run_usages.append(d)
+            return d
+
+        # Shared state visible in `finally` for partial-manifest writes.
         iterations: list[Iteration] = []
-        previous_brd: str | None = None
-        previous_premortem: Premortem | None = None
-        pending_guidance: str = ""  # filled between iterations from user input
-
-        for n in range(1, max_iter + 1):
-            yield _event("iteration_started", n=n)
-
-            if previous_brd is None:
-                user_msg = BRAINSTORM_INITIAL_USER.format(idea=idea)
-            else:
-                guidance_block = (
-                    USER_GUIDANCE_BLOCK.format(guidance=pending_guidance.strip())
-                    if pending_guidance.strip()
-                    else ""
-                )
-                user_msg = BRAINSTORM_REVISION_USER.format(
-                    previous_brd=previous_brd,
-                    premortem_summary=_format_premortem_for_revision(previous_premortem),
-                    guidance_block=guidance_block,
-                )
-
-            yield _event("brainstorm_started", n=n)
-            brd = await self._brainstorm(user_msg)
-            (run_dir / f"brd-v{n}.md").write_text(brd)
-            yield _event("brainstorm_done", n=n, brd=brd)
-
-            yield _event("premortem_started", n=n)
-            premortem = await self._premortem(brd)
-            (run_dir / f"premortem-v{n}.json").write_text(json.dumps(_premortem_to_dict(premortem), indent=2))
-            yield _event(
-                "premortem_done",
-                n=n,
-                score=premortem.score,
-                verdict=premortem.verdict,
-                summary=premortem.summary,
-                red_count=premortem.red_count,
-                yellow_count=premortem.yellow_count,
-                flags=[asdict(f) for f in premortem.flags],
-            )
-
-            iterations.append(Iteration(n=n, brd=brd, premortem=premortem))
-            previous_brd = brd
-            previous_premortem = premortem
-
-            if premortem.is_green_lit():
-                yield _event("green_lit", n=n, score=premortem.score)
-                break
-
-            if n == max_iter:
-                yield _event("cap_hit", n=n)
-                break
-
-            # Strategic-pause: surface top issues, wait for user guidance (or skip).
-            top_issues = [asdict(f) for f in _top_strategic_issues(premortem, k=5)]
-            yield _event(
-                "awaiting_input",
-                n=n,
-                next_iteration=n + 1,
-                top_issues=top_issues,
-                score=premortem.score,
-            )
-            if guidance_fn is not None:
-                pending_guidance = await guidance_fn(n, top_issues)
-            else:
-                pending_guidance = ""
-            iterations[-1].user_guidance_after = pending_guidance.strip()
-            if pending_guidance.strip():
-                (run_dir / f"guidance-after-v{n}.txt").write_text(pending_guidance)
-                yield _event("guidance_received", n=n, guidance=pending_guidance)
-            else:
-                yield _event("guidance_skipped", n=n)
-
-        # Pick final: latest if green-lit, else best-scoring.
-        if iterations[-1].premortem.is_green_lit():
-            final = iterations[-1]
-            warning = None
-        else:
-            final = max(iterations, key=lambda it: it.premortem.score)
-            warning = (
-                f"Did not meet the bar (score ≥ {SCORE_THRESHOLD} and zero red flags) "
-                f"after {len(iterations)} iterations. Publishing the best-scoring draft "
-                f"(iteration {final.n}, score {final.premortem.score}). "
-                f"Remaining red flags: {final.premortem.red_count}."
-            )
-
-        (run_dir / "final-brd.md").write_text(final.brd)
-        (run_dir / "final-premortem.json").write_text(json.dumps(_premortem_to_dict(final.premortem), indent=2))
-
-        yield _event("evolution_report_started")
-        try:
-            evolution_report = await self._evolution_report(idea, iterations, final)
-        except Exception as e:
-            evolution_report = f"# Evolution Report\n\nFailed to generate: {e}"
-        (run_dir / "evolution-report.md").write_text(evolution_report)
-        yield _event("evolution_report_done", report=evolution_report)
-
-        # VC consideration stage: match top 3 firms, run partner memos in parallel, synthesize consensus.
+        final: Iteration | None = None
+        warning: str | None = None
         vc_data: dict | None = None
+        status: str = "aborted"
+        error_msg: str | None = None
+        run_usages: list[dict] = []  # every call's usage record across the whole run
+
         try:
-            yield _event("vc_stage_started")
-            vc_db = json.loads(VC_PROFILES_PATH.read_text())
-            yield _event("vc_matching")
-            matched = await self._vc_match(final.brd, vc_db)
-            yield _event(
-                "vc_matched",
-                matches=[{"firm": m["profile"]["firm"], "id": m["profile"]["id"], "reason": m["reason"]} for m in matched],
+            yield emit(
+                "run_started",
+                run_id=run_id,
+                max_iterations=max_iter,
+                threshold=SCORE_THRESHOLD,
+                brainstorm_model=BRAINSTORM_MODEL,
+                premortem_model=PREMORTEM_MODEL,
+                started_at=run_started_at,
             )
 
-            yield _event("vc_evaluating", count=len(matched))
-            evals = await asyncio.gather(
-                *[self._vc_eval(final.brd, m["profile"], final.premortem.score, final.premortem.summary) for m in matched],
-                return_exceptions=True,
+            previous_brd: str | None = None
+            previous_premortem: Premortem | None = None
+            pending_guidance: str = ""  # filled between iterations from user input
+
+            for n in range(1, max_iter + 1):
+                iteration_id = _new_iteration_id(run_id, n)
+                iter_dir = run_dir / "iterations" / iteration_id
+                if iter_dir.exists():
+                    # Collision is essentially impossible (uuid4 6-hex) but be paranoid.
+                    raise RuntimeError(f"Iteration directory {iter_dir} already exists; aborting to avoid overwrite.")
+                iter_dir.mkdir(parents=True)
+
+                yield emit("iteration_started", n=n, iteration_id=iteration_id)
+
+                guidance_used = pending_guidance.strip()
+                if previous_brd is None:
+                    user_msg = BRAINSTORM_INITIAL_USER.format(idea=idea)
+                else:
+                    guidance_block = (
+                        USER_GUIDANCE_BLOCK.format(guidance=guidance_used)
+                        if guidance_used
+                        else ""
+                    )
+                    user_msg = BRAINSTORM_REVISION_USER.format(
+                        previous_brd=previous_brd,
+                        premortem_summary=_format_premortem_for_revision(previous_premortem),
+                        guidance_block=guidance_block,
+                    )
+
+                brainstorm_started_at = _now_iso()
+                yield emit(
+                    "brainstorm_started",
+                    n=n,
+                    iteration_id=iteration_id,
+                    started_at=brainstorm_started_at,
+                    model=MODELS["brainstorm"],
+                )
+                brd, brainstorm_usage = await self._brainstorm(user_msg)
+                bu = record_usage("brainstorm", brainstorm_usage, iteration_id)
+                brainstorm_finished_at = _now_iso()
+                # Canonical iteration files (immutable).
+                (iter_dir / "brd.md").write_text(brd)
+                # Backward-compat flat path.
+                (run_dir / f"brd-v{n}.md").write_text(brd)
+                yield emit(
+                    "brainstorm_done",
+                    n=n,
+                    iteration_id=iteration_id,
+                    finished_at=brainstorm_finished_at,
+                    brd=brd,
+                    usage=bu,
+                )
+
+                premortem_started_at = _now_iso()
+                yield emit(
+                    "premortem_started",
+                    n=n,
+                    iteration_id=iteration_id,
+                    started_at=premortem_started_at,
+                    model=MODELS["premortem"],
+                )
+                premortem, premortem_usage = await self._premortem(brd)
+                pu = record_usage("premortem", premortem_usage, iteration_id)
+                premortem_finished_at = _now_iso()
+                premortem_dict = _premortem_to_dict(premortem)
+                (iter_dir / "premortem.json").write_text(json.dumps(premortem_dict, indent=2))
+                (run_dir / f"premortem-v{n}.json").write_text(json.dumps(premortem_dict, indent=2))
+                yield emit(
+                    "premortem_done",
+                    n=n,
+                    iteration_id=iteration_id,
+                    finished_at=premortem_finished_at,
+                    score=premortem.score,
+                    verdict=premortem.verdict,
+                    summary=premortem.summary,
+                    red_count=premortem.red_count,
+                    yellow_count=premortem.yellow_count,
+                    flags=[asdict(f) for f in premortem.flags],
+                    usage=pu,
+                )
+
+                iter_usages = [bu, pu]
+                iter_cost = round(sum(u["cost_usd"] for u in iter_usages), 6)
+                run_total_cost = round(sum(u["cost_usd"] for u in run_usages), 6)
+                yield emit(
+                    "iteration_cost",
+                    n=n,
+                    iteration_id=iteration_id,
+                    iteration_cost_usd=iter_cost,
+                    run_cost_usd_so_far=run_total_cost,
+                )
+
+                iteration = Iteration(
+                    n=n,
+                    iteration_id=iteration_id,
+                    brd=brd,
+                    premortem=premortem,
+                    brainstorm_started_at=brainstorm_started_at,
+                    brainstorm_finished_at=brainstorm_finished_at,
+                    premortem_started_at=premortem_started_at,
+                    premortem_finished_at=premortem_finished_at,
+                    brainstorm_model=MODELS["brainstorm"],
+                    premortem_model=MODELS["premortem"],
+                    user_guidance_used=guidance_used,
+                    usages=iter_usages,
+                    cost_usd=iter_cost,
+                )
+                iterations.append(iteration)
+                previous_brd = brd
+                previous_premortem = premortem
+
+                # Write iteration sidecar now (without trailing guidance — written again after pause).
+                _write_iter_sidecar(iter_dir, iteration, run_id, premortem_dict)
+
+                if premortem.is_green_lit():
+                    yield emit("green_lit", n=n, iteration_id=iteration_id, score=premortem.score)
+                    break
+
+                if n == max_iter:
+                    yield emit("cap_hit", n=n, iteration_id=iteration_id)
+                    break
+
+                # Strategic-pause: surface top issues, wait for user guidance (or skip / timeout).
+                top_issues = [asdict(f) for f in _top_strategic_issues(premortem, k=5)]
+                yield emit(
+                    "awaiting_input",
+                    n=n,
+                    iteration_id=iteration_id,
+                    next_iteration=n + 1,
+                    top_issues=top_issues,
+                    score=premortem.score,
+                    timeout_s=GUIDANCE_TIMEOUT_S,
+                )
+                if guidance_fn is not None:
+                    pending_guidance = await guidance_fn(n, top_issues, GUIDANCE_TIMEOUT_S)
+                else:
+                    pending_guidance = ""
+                iteration.user_guidance_after = pending_guidance.strip()
+                if pending_guidance.strip():
+                    (iter_dir / "guidance.txt").write_text(pending_guidance)
+                    # Backward-compat flat path.
+                    (run_dir / f"guidance-after-v{n}.txt").write_text(pending_guidance)
+                    yield emit(
+                        "guidance_received",
+                        n=n,
+                        iteration_id=iteration_id,
+                        guidance=pending_guidance,
+                    )
+                else:
+                    yield emit("guidance_skipped", n=n, iteration_id=iteration_id)
+                # Rewrite sidecar so the guidance-after field is captured.
+                _write_iter_sidecar(iter_dir, iteration, run_id, premortem_dict)
+
+            # Pick final: latest if green-lit, else best-scoring.
+            if iterations[-1].premortem.is_green_lit():
+                final = iterations[-1]
+                warning = None
+            else:
+                final = max(iterations, key=lambda it: it.premortem.score)
+                warning = (
+                    f"Did not meet the bar (score ≥ {SCORE_THRESHOLD} and zero red flags) "
+                    f"after {len(iterations)} iterations. Publishing the best-scoring draft "
+                    f"(iteration {final.n}, score {final.premortem.score}). "
+                    f"Remaining red flags: {final.premortem.red_count}."
+                )
+
+            (run_dir / "final-brd.md").write_text(final.brd)
+            (run_dir / "final-premortem.json").write_text(json.dumps(_premortem_to_dict(final.premortem), indent=2))
+
+            yield emit("evolution_report_started", model=MODELS["evolution"])
+            evo_usage_dict: dict | None = None
+            try:
+                evolution_report, evo_usage = await self._evolution_report(idea, iterations, final)
+                evo_usage_dict = record_usage("evolution", evo_usage)
+            except Exception as e:
+                evolution_report = f"# Evolution Report\n\nFailed to generate: {e}"
+            (run_dir / "evolution-report.md").write_text(evolution_report)
+            yield emit("evolution_report_done", report=evolution_report, usage=evo_usage_dict)
+
+            # VC consideration stage: match top 3 firms, run partner memos in parallel, synthesize consensus.
+            try:
+                yield emit("vc_stage_started")
+                vc_db = json.loads(VC_PROFILES_PATH.read_text())
+                yield emit("vc_matching", model=MODELS["vc_match"])
+                matched, match_usage = await self._vc_match(final.brd, vc_db)
+                record_usage("vc_match", match_usage)
+                yield emit(
+                    "vc_matched",
+                    matches=[{"firm": m["profile"]["firm"], "id": m["profile"]["id"], "reason": m["reason"]} for m in matched],
+                    usage=match_usage.to_dict(),
+                )
+
+                yield emit("vc_evaluating", count=len(matched), model=MODELS["vc_eval"])
+                evals = await asyncio.gather(
+                    *[self._vc_eval(final.brd, m["profile"], final.premortem.score, final.premortem.summary) for m in matched],
+                    return_exceptions=True,
+                )
+                memos: list[dict] = []
+                for m, e in zip(matched, evals):
+                    if isinstance(e, Exception):
+                        yield emit("vc_eval_error", firm=m["profile"]["firm"], message=str(e))
+                        continue
+                    eval_payload, eval_usage = e
+                    eu = record_usage("vc_eval", eval_usage)
+                    memos.append({"profile": m["profile"], "match_reason": m["reason"], "eval": eval_payload})
+                    yield emit(
+                        "vc_eval_done",
+                        firm=m["profile"]["firm"],
+                        eval=eval_payload,
+                        match_reason=m["reason"],
+                        profile=m["profile"],
+                        usage=eu,
+                    )
+
+                consensus = None
+                if len(memos) >= 2:
+                    yield emit("vc_consensus_started", model=MODELS["vc_consensus"])
+                    consensus, consensus_usage = await self._vc_consensus(memos)
+                    cu = record_usage("vc_consensus", consensus_usage)
+                    yield emit("vc_consensus_done", consensus=consensus, usage=cu)
+
+                vc_data = {"memos": memos, "consensus": consensus}
+                (run_dir / "vc-evaluation.json").write_text(json.dumps(vc_data, indent=2))
+                (run_dir / "vc-evaluation.md").write_text(_render_vc_markdown(vc_data))
+            except Exception as e:
+                yield emit("vc_stage_error", message=str(e))
+
+            status = "completed"
+
+            total_cost = round(sum(u["cost_usd"] for u in run_usages), 6)
+            yield emit(
+                "final",
+                n=final.n,
+                iteration_id=final.iteration_id,
+                score=final.premortem.score,
+                verdict=final.premortem.verdict,
+                green_lit=final.premortem.is_green_lit(),
+                warning=warning,
+                brd=final.brd,
+                premortem={
+                    "score": final.premortem.score,
+                    "verdict": final.premortem.verdict,
+                    "summary": final.premortem.summary,
+                    "flags": [asdict(f) for f in final.premortem.flags],
+                },
+                run_id=run_id,
+                total_iterations=len(iterations),
+                cost_usd=total_cost,
             )
-            memos: list[dict] = []
-            for m, e in zip(matched, evals):
-                if isinstance(e, Exception):
-                    yield _event("vc_eval_error", firm=m["profile"]["firm"], message=str(e))
-                    continue
-                memos.append({"profile": m["profile"], "match_reason": m["reason"], "eval": e})
-                yield _event("vc_eval_done", firm=m["profile"]["firm"], eval=e, match_reason=m["reason"], profile=m["profile"])
-
-            consensus = None
-            if len(memos) >= 2:
-                yield _event("vc_consensus_started")
-                consensus = await self._vc_consensus(memos)
-                yield _event("vc_consensus_done", consensus=consensus)
-
-            vc_data = {"memos": memos, "consensus": consensus}
-            (run_dir / "vc-evaluation.json").write_text(json.dumps(vc_data, indent=2))
-            (run_dir / "vc-evaluation.md").write_text(_render_vc_markdown(vc_data))
-        except Exception as e:
-            yield _event("vc_stage_error", message=str(e))
-
-        yield _event(
-            "final",
-            n=final.n,
-            score=final.premortem.score,
-            verdict=final.premortem.verdict,
-            green_lit=final.premortem.is_green_lit(),
-            warning=warning,
-            brd=final.brd,
-            premortem={
-                "score": final.premortem.score,
-                "verdict": final.premortem.verdict,
-                "summary": final.premortem.summary,
-                "flags": [asdict(f) for f in final.premortem.flags],
-            },
-            run_id=run_id,
-            total_iterations=len(iterations),
-        )
+        except Exception as exc:
+            status = "errored"
+            error_msg = f"{type(exc).__name__}: {exc}"
+            try:
+                logger.write("run_errored", {"error": error_msg})
+            except Exception:
+                pass
+            raise
+        finally:
+            # Always write a manifest with whatever state we have.
+            try:
+                _write_run_manifest(
+                    run_dir=run_dir,
+                    run_id=run_id,
+                    idea=idea,
+                    started_at=run_started_at,
+                    finished_at=_now_iso(),
+                    max_iter=max_iter,
+                    threshold=SCORE_THRESHOLD,
+                    iterations=iterations,
+                    final=final,
+                    warning=warning,
+                    vc_data=vc_data,
+                    status=status,
+                    error=error_msg,
+                    run_usages=run_usages,
+                )
+            except Exception:
+                pass
+            logger.close()
 
 
 def _fmt_usd(n: int | None) -> str:
@@ -504,6 +723,121 @@ def _render_vc_markdown(vc_data: dict) -> str:
                 lines.append(f"- {b}")
         lines.append("")
     return "\n".join(lines)
+
+
+def _write_iter_sidecar(iter_dir: Path, it: Iteration, run_id: str, premortem_dict: dict) -> None:
+    """Write the iter.json metadata sidecar for an iteration. Idempotent."""
+    sidecar = {
+        "iteration_id": it.iteration_id,
+        "run_id": run_id,
+        "n": it.n,
+        "brainstorm_model": it.brainstorm_model,
+        "premortem_model": it.premortem_model,
+        "brainstorm_started_at": it.brainstorm_started_at,
+        "brainstorm_finished_at": it.brainstorm_finished_at,
+        "premortem_started_at": it.premortem_started_at,
+        "premortem_finished_at": it.premortem_finished_at,
+        "premortem": premortem_dict,
+        "user_guidance_used": it.user_guidance_used,
+        "user_guidance_after": it.user_guidance_after,
+        "is_green_lit": it.premortem.is_green_lit(),
+        "cost_usd": it.cost_usd,
+        "usages": it.usages,
+    }
+    (iter_dir / "iter.json").write_text(json.dumps(sidecar, indent=2))
+
+
+def _write_run_manifest(
+    *,
+    run_dir: Path,
+    run_id: str,
+    idea: str,
+    started_at: str,
+    finished_at: str,
+    max_iter: int,
+    threshold: int,
+    iterations: list[Iteration],
+    final: Iteration | None,
+    warning: str | None,
+    vc_data: dict | None,
+    status: str,  # "completed" | "aborted" | "errored"
+    error: str | None = None,
+    run_usages: list[dict] | None = None,
+) -> None:
+    """Write run.json — the top-level manifest. Resilient: works with partial state.
+
+    Always overwrites in place; the file holds the latest snapshot of run state.
+    Per-iteration files in iterations/ are append-only and never touched here.
+    """
+    run_usages = run_usages or []
+    cost_usd = round(sum(u["cost_usd"] for u in run_usages), 6)
+    # Aggregate per-role + per-model for quick reading.
+    cost_by_role: dict[str, float] = {}
+    cost_by_model: dict[str, float] = {}
+    tokens_in = 0
+    tokens_out = 0
+    for u in run_usages:
+        cost_by_role[u["role"]] = round(cost_by_role.get(u["role"], 0.0) + u["cost_usd"], 6)
+        cost_by_model[u["model"]] = round(cost_by_model.get(u["model"], 0.0) + u["cost_usd"], 6)
+        tokens_in += u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
+        tokens_out += u.get("output_tokens", 0)
+
+    manifest = {
+        "run_id": run_id,
+        "schema_version": 2,
+        "status": status,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "settings": {
+            "max_iterations": max_iter,
+            "score_threshold": threshold,
+            "models": dict(MODELS),
+        },
+        "idea": idea,
+        "total_iterations": len(iterations),
+        "warning": warning,
+        "error": error,
+        "cost": {
+            "total_usd": cost_usd,
+            "by_role": cost_by_role,
+            "by_model": cost_by_model,
+            "tokens_input_total": tokens_in,
+            "tokens_output_total": tokens_out,
+        },
+        "usages": run_usages,
+        "iterations": [
+            {
+                "iteration_id": it.iteration_id,
+                "n": it.n,
+                "score": it.premortem.score,
+                "verdict": it.premortem.verdict,
+                "red_count": it.premortem.red_count,
+                "yellow_count": it.premortem.yellow_count,
+                "had_guidance_in": bool(it.user_guidance_used),
+                "had_guidance_after": bool(it.user_guidance_after),
+                "brainstorm_started_at": it.brainstorm_started_at,
+                "brainstorm_finished_at": it.brainstorm_finished_at,
+                "premortem_started_at": it.premortem_started_at,
+                "premortem_finished_at": it.premortem_finished_at,
+                "cost_usd": it.cost_usd,
+            }
+            for it in iterations
+        ],
+        "final_iteration_id": final.iteration_id if final else None,
+        "final_iteration_n": final.n if final else None,
+        "final_score": final.premortem.score if final else None,
+        "final_verdict": final.premortem.verdict if final else None,
+        "green_lit": final.premortem.is_green_lit() if final else None,
+        "vc": (
+            {
+                "matched_firms": [m["profile"]["firm"] for m in (vc_data.get("memos") or [])],
+                "consensus": vc_data.get("consensus"),
+            }
+            if vc_data
+            else None
+        ),
+    }
+    (run_dir / "run.json").write_text(json.dumps(manifest, indent=2))
 
 
 def _premortem_to_dict(p: Premortem) -> dict:

@@ -17,6 +17,11 @@
       <span class="dot"></span>
       <span>SYSTEM ONLINE</span>
       <span class="divider"></span>
+      <span class="cost-strip" id="costStrip" title="Spend across runs (click to refresh)">
+        <span class="cs-item"><span class="cs-label">TODAY</span><span class="cs-val" id="costToday">$0.00</span></span>
+        <span class="cs-item"><span class="cs-label">WEEK</span><span class="cs-val" id="costWeek">$0.00</span></span>
+        <span class="cs-item"><span class="cs-label">MONTH</span><span class="cs-val" id="costMonth">$0.00</span></span>
+      </span>
       <span id="hudClock">--:--:--</span>
     </div>
     <h1>Minority Report</h1>
@@ -39,11 +44,23 @@
 
     <section class="run hidden" id="run">
       <div class="status" id="status">Connecting…</div>
+      <div class="run-cost" id="runCost"><span class="cs-label">THIS RUN</span> <span class="cs-val" id="runCostVal">$0.00</span></div>
       <div id="iterations"></div>
 
       <div class="pause-panel hidden" id="pausePanel">
-        <h3>Your turn — strategic check-in</h3>
-        <p class="hint" id="pauseSubtitle"></p>
+        <div class="pause-head">
+          <div>
+            <h3>Your turn — strategic check-in</h3>
+            <p class="hint" id="pauseSubtitle"></p>
+          </div>
+          <div class="timer-ring" id="timerRing" title="Auto-continues if no input">
+            <svg viewBox="0 0 60 60">
+              <circle class="ring-track" cx="30" cy="30" r="26" />
+              <circle class="ring-progress" id="ringProgress" cx="30" cy="30" r="26" />
+            </svg>
+            <div class="ring-label" id="ringLabel">60</div>
+          </div>
+        </div>
         <ol id="pauseIssues" class="pause-issues"></ol>
         <label for="guidance">// Strategic guidance — binding, overrides premortem flags on conflict</label>
         <textarea id="guidance" rows="5" placeholder="e.g. Drop the calendar integration entirely — it's not core. Decide on a paid-only model. Use Postgres, not DynamoDB."></textarea>

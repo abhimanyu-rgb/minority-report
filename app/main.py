@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -49,9 +49,12 @@ async def process(idea: str, max_iterations: int = 5):
     queue: asyncio.Queue[str] = asyncio.Queue()
     GUIDANCE_QUEUES[run_id] = queue
 
-    async def guidance_fn(iteration: int, top_issues: list[dict]) -> str:
-        # Block until /resume puts something for this run.
-        return await queue.get()
+    async def guidance_fn(iteration: int, top_issues: list[dict], timeout_s: int) -> str:
+        # Race the user's POST /resume against a timeout. Timeout == empty guidance (skip).
+        try:
+            return await asyncio.wait_for(queue.get(), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            return ""
 
     orch = Orchestrator()
 
@@ -65,6 +68,74 @@ async def process(idea: str, max_iterations: int = 5):
             GUIDANCE_QUEUES.pop(run_id, None)
 
     return EventSourceResponse(event_gen())
+
+
+RUNS_DIR = Path(__file__).resolve().parent.parent / "runs"
+
+
+@app.get("/costs")
+async def costs():
+    """Scan runs/<id>/run.json files and return aggregate cost rollups."""
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = today_start - timedelta(days=now.weekday())  # Monday
+    month_start = today_start.replace(day=1)
+
+    totals = {"today": 0.0, "week": 0.0, "month": 0.0, "all_time": 0.0}
+    counts = {"today": 0, "week": 0, "month": 0, "all_time": 0}
+    recent_runs: list[dict] = []
+
+    if RUNS_DIR.exists():
+        for run_dir in sorted(RUNS_DIR.iterdir(), reverse=True):
+            manifest_path = run_dir / "run.json"
+            if not manifest_path.is_file():
+                continue
+            try:
+                m = json.loads(manifest_path.read_text())
+            except Exception:
+                continue
+            cost = float(((m.get("cost") or {}).get("total_usd")) or 0.0)
+            started = m.get("started_at")
+            try:
+                started_dt = datetime.fromisoformat(started.replace("Z", "+00:00")) if started else None
+            except Exception:
+                started_dt = None
+
+            totals["all_time"] += cost
+            counts["all_time"] += 1
+            if started_dt:
+                if started_dt >= today_start:
+                    totals["today"] += cost
+                    counts["today"] += 1
+                if started_dt >= week_start:
+                    totals["week"] += cost
+                    counts["week"] += 1
+                if started_dt >= month_start:
+                    totals["month"] += cost
+                    counts["month"] += 1
+
+            if len(recent_runs) < 10:
+                recent_runs.append({
+                    "run_id": m.get("run_id"),
+                    "started_at": started,
+                    "status": m.get("status"),
+                    "total_iterations": m.get("total_iterations"),
+                    "final_score": m.get("final_score"),
+                    "cost_usd": round(cost, 6),
+                    "idea_preview": (m.get("idea") or "")[:120],
+                })
+
+    return JSONResponse({
+        "totals_usd": {k: round(v, 6) for k, v in totals.items()},
+        "counts": counts,
+        "recent_runs": recent_runs,
+        "window": {
+            "today_start": today_start.isoformat(),
+            "week_start": week_start.isoformat(),
+            "month_start": month_start.isoformat(),
+            "now": now.isoformat(),
+        },
+    })
 
 
 @app.post("/resume/{run_id}")

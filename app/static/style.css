@@ -113,6 +113,77 @@ header {
 }
 .hud-bar .divider { flex: 1; height: 1px; background: linear-gradient(90deg, var(--border-bright), transparent); }
 
+/* Cost strip in HUD bar */
+.cost-strip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 0.2rem 0.7rem;
+  background: rgba(20, 34, 58, 0.55);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.cost-strip:hover { background: rgba(30, 50, 80, 0.7); border-color: var(--border-bright); }
+.cs-item { display: inline-flex; flex-direction: column; line-height: 1.1; align-items: flex-start; }
+.cs-label { font-size: 0.55rem; color: var(--muted); letter-spacing: 0.18em; }
+.cs-val { font-size: 0.78rem; color: var(--cyan-bright); font-weight: 600; letter-spacing: 0.02em; }
+
+/* Per-run cost meter */
+.run-cost {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.85rem;
+  margin-bottom: 1rem;
+  background: rgba(20, 34, 58, 0.4);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+}
+.run-cost .cs-label { font-size: 0.62rem; }
+.run-cost .cs-val { font-size: 1rem; }
+
+/* Timer ring on strategic-pause panel */
+.pause-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
+.timer-ring {
+  position: relative;
+  width: 60px; height: 60px;
+  flex: 0 0 60px;
+}
+.timer-ring svg { width: 60px; height: 60px; transform: rotate(-90deg); }
+.timer-ring .ring-track {
+  fill: none;
+  stroke: rgba(120, 200, 255, 0.12);
+  stroke-width: 3;
+}
+.timer-ring .ring-progress {
+  fill: none;
+  stroke: var(--cyan);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-dasharray: 163.36;  /* 2*pi*r where r=26 */
+  stroke-dashoffset: 0;
+  transition: stroke-dashoffset 1s linear, stroke 0.3s;
+  filter: drop-shadow(0 0 4px var(--cyan-glow));
+}
+.timer-ring.expiring .ring-progress { stroke: var(--amber); }
+.timer-ring.critical .ring-progress { stroke: var(--red); }
+.timer-ring .ring-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--cyan-bright);
+}
+.timer-ring.expiring .ring-label { color: var(--amber); }
+.timer-ring.critical .ring-label { color: var(--red); }
+
 header h1 {
   margin: 0;
   font-size: 1.6rem;
@@ -352,6 +423,23 @@ button.secondary:hover:not(:disabled) {
 }
 
 .iter-meta { display: flex; gap: 0.5rem; align-items: center; }
+
+.iter-id-chip {
+  display: inline-block;
+  margin-left: 0.5rem;
+  padding: 0.05rem 0.45rem;
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  font-size: 0.65rem;
+  letter-spacing: 0.04em;
+  color: var(--cyan);
+  background: rgba(111, 216, 255, 0.08);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+  text-transform: none;
+  vertical-align: middle;
+}
+.iter-id-chip:hover { background: rgba(111, 216, 255, 0.18); }
 
 /* ----------------- FLAGS ----------------- */
 
