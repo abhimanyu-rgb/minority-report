@@ -470,7 +470,9 @@ function handlers() {
       const dlBtn = $("downloadPdfBtn");
       if (dlBar && dlBtn && d.run_id) {
         dlBtn.href = `/runs/${encodeURIComponent(d.run_id)}/report.pdf`;
-        dlBtn.setAttribute("download", `minority-report-${d.run_id}.pdf`);
+        // No explicit `download` value — let the server's Content-Disposition
+        // (minority_report_<project-title>.pdf) drive the filename.
+        dlBtn.setAttribute("download", "");
         dlBar.classList.remove("hidden");
       }
       finalEl.scrollIntoView({ behavior: "smooth" });

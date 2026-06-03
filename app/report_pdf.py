@@ -541,3 +541,58 @@ def _extract_title(markdown_text: str) -> str:
         if line.startswith("# ") and not line.startswith("## "):
             return line[2:].strip()
     return ""
+
+
+_TITLE_MAX_LEN = 10
+
+
+def extract_project_title(run_dir: Path) -> str:
+    """Public helper: best-effort project name for filename / display.
+
+    Truncates to the first 10 characters (word-aware when possible).
+    Falls back through: BRD H1 -> first chars of idea -> empty string.
+    """
+    brd_path = run_dir / "final-brd.md"
+    if brd_path.is_file():
+        title = _extract_title(brd_path.read_text())
+        if title:
+            return _truncate(title, _TITLE_MAX_LEN)
+    idea_path = run_dir / "idea.txt"
+    if idea_path.is_file():
+        idea = idea_path.read_text().strip()
+        if idea:
+            return _truncate(idea, _TITLE_MAX_LEN)
+    return ""
+
+
+def _truncate(s: str, n: int) -> str:
+    """Trim to at most n chars; prefer word boundary if the trim falls inside a word."""
+    s = s.strip()
+    if len(s) <= n:
+        return s
+    head = s[:n]
+    # If we cut mid-word and there's a space before n, back up to it.
+    if " " in head and not s[n:n + 1].isspace():
+        head = head.rsplit(" ", 1)[0]
+    return head.strip() or s[:n]
+
+
+def filename_slug(s: str, fallback: str = "report") -> str:
+    """Sanitize a title into a safe filename slug.
+
+    Keeps ASCII letters, digits, spaces, hyphens, underscores. Converts spaces
+    to underscores. Collapses repeats. Lower-cases nothing — preserves the
+    original casing so 'NuRecruit' stays 'NuRecruit'.
+    """
+    import re
+    if not s:
+        return fallback
+    # Replace anything not [A-Za-z0-9 _-] with a space.
+    cleaned = re.sub(r"[^A-Za-z0-9 _-]+", " ", s)
+    # Collapse whitespace, swap spaces for underscores.
+    cleaned = re.sub(r"\s+", "_", cleaned.strip())
+    # Collapse runs of _ or -.
+    cleaned = re.sub(r"_+", "_", cleaned)
+    cleaned = re.sub(r"-+", "-", cleaned)
+    cleaned = cleaned.strip("_-")
+    return cleaned or fallback

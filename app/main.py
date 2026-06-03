@@ -18,7 +18,7 @@ from sse_starlette.sse import EventSourceResponse
 load_dotenv()
 
 from .orchestrator import Orchestrator  # noqa: E402
-from .report_pdf import render_run_pdf  # noqa: E402
+from .report_pdf import render_run_pdf, extract_project_title, filename_slug  # noqa: E402
 
 from fastapi.responses import Response  # noqa: E402
 
@@ -292,8 +292,13 @@ async def report_pdf(run_id: str):
         pdf_bytes = render_run_pdf(run_dir)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF render failed: {e}") from e
+
+    project_title = extract_project_title(run_dir)
+    slug = filename_slug(project_title, fallback=run_id)
+    filename = f"minority_report_{slug}.pdf"
+
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="minority-report-{run_id}.pdf"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

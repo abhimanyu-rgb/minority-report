@@ -38,7 +38,11 @@
       "Bash(brew list *)",
       "Bash(curl -s -o /tmp/live.pdf -w \"pdf endpoint: HTTP %{http_code}, %{size_download} bytes\\\\n\" \"http://localhost:8000/runs/20260603-163440-d813c9/report.pdf\")",
       "Read(//private/tmp/**)",
-      "Bash(awk '{print $2}')"
+      "Bash(awk '{print $2}')",
+      "Bash(grep -n \"^\\\\.env$\" .gitignore)",
+      "Bash(grep -v '^$')",
+      "Bash(curl -sI \"http://localhost:8000/runs/20260603-174831-539e61/report.pdf\")",
+      "Bash(curl -s -D - -o /dev/null \"http://localhost:8000/runs/20260603-174831-539e61/report.pdf\")"
     ],
     "additionalDirectories": [
       "/private/var/folders/3p/04vgn6jn0fl6l5jpmk8m1kw80000gq/T/tmp.3D8cTEdxMQ"
