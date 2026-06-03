@@ -26,6 +26,9 @@ const finalPremortem = $("finalPremortem");
 
 let es = null;
 let currentRunId = null;
+let reconnectAttempt = 0;
+let reconnectTimer = null;
+let isReconnecting = false;
 const iterCards = {};
 
 const pausePanel = $("pausePanel");
@@ -462,6 +465,14 @@ function handlers() {
       btn.textContent = "Process this idea";
       if (es) { es.close(); es = null; }
       hidePausePanel();
+      // Wire up the PDF download link now that the run is finalized server-side.
+      const dlBar = $("downloadBar");
+      const dlBtn = $("downloadPdfBtn");
+      if (dlBar && dlBtn && d.run_id) {
+        dlBtn.href = `/runs/${encodeURIComponent(d.run_id)}/report.pdf`;
+        dlBtn.setAttribute("download", `minority-report-${d.run_id}.pdf`);
+        dlBar.classList.remove("hidden");
+      }
       finalEl.scrollIntoView({ behavior: "smooth" });
       refreshCosts();  // pull updated totals into the HUD strip
     },
@@ -471,6 +482,59 @@ function handlers() {
       btn.textContent = "Process this idea";
       if (es) { es.close(); es = null; }
     },
+  };
+}
+
+function attachEventSource(url) {
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if (es) { try { es.close(); } catch {} }
+  es = new EventSource(url);
+
+  const h = handlers();
+  for (const name of Object.keys(h)) {
+    es.addEventListener(name, (ev) => {
+      try { h[name](JSON.parse(ev.data)); } catch (e) { console.error(e, ev.data); }
+    });
+  }
+
+  es.onopen = () => {
+    if (isReconnecting) {
+      isReconnecting = false;
+      reconnectAttempt = 0;
+      setStatus("Reconnected. Resuming run…");
+    }
+  };
+
+  es.onerror = () => {
+    // EventSource auto-reconnects per spec, but we override that behavior to
+    // (a) switch to the /stream/<run_id> endpoint after the first failure,
+    // (b) cap retries with exponential backoff, and (c) give the user a
+    // visible "Reconnecting" status instead of silent failure.
+    if (es) { try { es.close(); } catch {} es = null; }
+
+    if (!currentRunId) {
+      // We never got past the initial connect — no run to resume.
+      setStatus("Connection lost before run started.", false);
+      btn.disabled = false;
+      btn.textContent = "Process this idea";
+      return;
+    }
+
+    reconnectAttempt += 1;
+    if (reconnectAttempt > 6) {
+      setStatus(`Connection lost. Could not reconnect after ${reconnectAttempt - 1} tries. Run ${currentRunId} may still be running server-side — refresh and reconnect manually if needed.`, false);
+      btn.disabled = false;
+      btn.textContent = "Process this idea";
+      return;
+    }
+
+    isReconnecting = true;
+    const delayMs = Math.min(2000 * Math.pow(1.6, reconnectAttempt - 1), 15000);
+    const delaySec = Math.round(delayMs / 1000);
+    setStatus(`Connection lost. Reconnecting in ${delaySec}s (attempt ${reconnectAttempt})…`, true);
+    reconnectTimer = setTimeout(() => {
+      attachEventSource(`/stream/${encodeURIComponent(currentRunId)}`);
+    }, delayMs);
   };
 }
 
@@ -485,6 +549,9 @@ btn.addEventListener("click", () => {
   itersEl.innerHTML = "";
   hidePausePanel();
   currentRunId = null;
+  reconnectAttempt = 0;
+  isReconnecting = false;
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   finalEl.classList.add("hidden");
   finalBanner.className = "";
   finalBanner.textContent = "";
@@ -494,25 +561,13 @@ btn.addEventListener("click", () => {
   $("vcSection").classList.add("hidden");
   $("vcMemos").innerHTML = "";
   $("vcConsensus").innerHTML = "";
+  $("downloadBar").classList.add("hidden");
+  $("downloadPdfBtn").href = "#";
   $("runCostVal").textContent = "$0.0000";
   runEl.classList.remove("hidden");
   setStatus("Connecting…");
   btn.disabled = true;
   btn.textContent = "Processing…";
 
-  const url = `/process?idea=${encodeURIComponent(idea)}&max_iterations=${maxIterations}`;
-  es = new EventSource(url);
-
-  const h = handlers();
-  for (const name of Object.keys(h)) {
-    es.addEventListener(name, (ev) => {
-      try { h[name](JSON.parse(ev.data)); } catch (e) { console.error(e, ev.data); }
-    });
-  }
-  es.onerror = () => {
-    setStatus("Connection lost.", false);
-    btn.disabled = false;
-    btn.textContent = "Process this idea";
-    if (es) { es.close(); es = null; }
-  };
+  attachEventSource(`/process?idea=${encodeURIComponent(idea)}&max_iterations=${maxIterations}`);
 });

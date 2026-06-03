@@ -11,6 +11,8 @@ dependencies = [
     "python-multipart>=0.0.12",
     "python-dotenv>=1.0",
     "sse-starlette>=2.1",
+    "weasyprint>=63.0",
+    "markdown>=3.7",
 ]
 
 [build-system]

@@ -23,7 +23,22 @@
       "Read(//tmp/**)",
       "Bash(curl -s http://localhost:8000/costs)",
       "Bash(python3 -m json.tool)",
-      "Bash(curl -sN --max-time 480 \"http://localhost:8000/process?idea=A%20Mac%20menubar%20app%20that%20tracks%20active%20focus%20sessions%20and%20gives%20a%20weekly%20report.&max_iterations=2\")"
+      "Bash(curl -sN --max-time 480 \"http://localhost:8000/process?idea=A%20Mac%20menubar%20app%20that%20tracks%20active%20focus%20sessions%20and%20gives%20a%20weekly%20report.&max_iterations=2\")",
+      "Bash(git push *)",
+      "Bash(python3 -c \"import sys, json; [print\\(json.loads\\(l\\)['type'], '-', json.loads\\(l\\).get\\('data',{}\\).get\\('message',json.loads\\(l\\).get\\('data',{}\\).get\\('verdict',''\\)\\)\\)[:80] for l in sys.stdin]\")",
+      "Bash(python3 -c \"import sys, json; m=json.load\\(sys.stdin\\); print\\('status:', m.get\\('status'\\), 'error:', m.get\\('error'\\), 'iters:', m.get\\('total_iterations'\\)\\)\")",
+      "Bash(curl -s http://localhost:8000/stream/nonexistent)",
+      "Bash(curl -sN --max-time 15 \"http://localhost:8000/process?idea=test%20idea%20short&max_iterations=1\")",
+      "Bash(curl -sN --max-time 8 \"http://localhost:8000/process?idea=test%20idea%20short&max_iterations=1\")",
+      "Bash(brew install *)",
+      "Bash(open /tmp/minority-test.pdf)",
+      "Bash(curl -s -o /dev/null -w \"homepage: %{http_code}\\\\n\" http://localhost:8000/)",
+      "Bash(open /tmp/live.pdf)",
+      "Bash(/opt/homebrew/bin/pdftotext -layout -f 3 -l 3 /tmp/minority-test.pdf -)",
+      "Bash(brew list *)",
+      "Bash(curl -s -o /tmp/live.pdf -w \"pdf endpoint: HTTP %{http_code}, %{size_download} bytes\\\\n\" \"http://localhost:8000/runs/20260603-163440-d813c9/report.pdf\")",
+      "Read(//private/tmp/**)",
+      "Bash(awk '{print $2}')"
     ],
     "additionalDirectories": [
       "/private/var/folders/3p/04vgn6jn0fl6l5jpmk8m1kw80000gq/T/tmp.3D8cTEdxMQ"

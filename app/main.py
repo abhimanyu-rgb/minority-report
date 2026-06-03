@@ -18,6 +18,9 @@ from sse_starlette.sse import EventSourceResponse
 load_dotenv()
 
 from .orchestrator import Orchestrator  # noqa: E402
+from .report_pdf import render_run_pdf  # noqa: E402
+
+from fastapi.responses import Response  # noqa: E402
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -29,45 +32,172 @@ templates = Jinja2Templates(directory=BASE_DIR / "templates")
 # puts the user's text. A None value means "skip" (treated as empty string).
 GUIDANCE_QUEUES: dict[str, asyncio.Queue[str]] = {}
 
+# Per-run live event broadcast: a list of subscriber queues. The orchestrator
+# task pushes each emitted event onto every subscriber's queue. The SSE
+# endpoint creates one subscriber per HTTP connection. This decouples the
+# orchestrator's lifecycle from any single client connection — if a browser
+# disconnects mid-run, the orchestrator keeps running and the next connection
+# to /stream/<run_id> replays the on-disk events.ndjson and then subscribes
+# to live events.
+LIVE_RUNS: dict[str, dict] = {}
+# Each LIVE_RUNS[run_id] = {
+#   "task": asyncio.Task,
+#   "subscribers": list[asyncio.Queue],
+#   "done": bool,
+#   "started_at": str,
+# }
+
+SSE_PING_S = 5  # heartbeat interval — keeps idle-looking connections alive
+
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     return templates.TemplateResponse(request, "index.html")
 
 
+async def _run_orchestrator(idea: str, run_id: str, max_iterations: int) -> None:
+    """Background task: runs the orchestrator, pushes each event to all subscribers."""
+    run_state = LIVE_RUNS[run_id]
+    guidance_queue: asyncio.Queue[str] = GUIDANCE_QUEUES[run_id]
+
+    async def guidance_fn(iteration: int, top_issues: list[dict], timeout_s: int) -> str:
+        try:
+            return await asyncio.wait_for(guidance_queue.get(), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            return ""
+
+    orch = Orchestrator()
+    try:
+        async for ev in orch.run(idea, run_id=run_id, guidance_fn=guidance_fn, max_iterations=max_iterations):
+            for subq in list(run_state["subscribers"]):
+                try:
+                    subq.put_nowait(ev)
+                except Exception:
+                    pass
+    except Exception as e:
+        ev = {"event": "error", "data": {"message": str(e)}}
+        for subq in list(run_state["subscribers"]):
+            try:
+                subq.put_nowait(ev)
+            except Exception:
+                pass
+    finally:
+        run_state["done"] = True
+        # Send a sentinel so any subscribed SSE generators can close cleanly.
+        sentinel = {"event": "__END__", "data": {}}
+        for subq in list(run_state["subscribers"]):
+            try:
+                subq.put_nowait(sentinel)
+            except Exception:
+                pass
+        GUIDANCE_QUEUES.pop(run_id, None)
+
+
 @app.get("/process")
 async def process(idea: str, max_iterations: int = 5):
-    """SSE endpoint. Streams events from the orchestrator."""
+    """Kick off a run and stream its events. Run survives this connection."""
     if not idea.strip():
         async def empty():
             yield {"event": "error", "data": json.dumps({"message": "Empty idea."})}
         return EventSourceResponse(empty())
 
     max_iterations = max(1, min(20, int(max_iterations)))
-
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
-    queue: asyncio.Queue[str] = asyncio.Queue()
-    GUIDANCE_QUEUES[run_id] = queue
 
-    async def guidance_fn(iteration: int, top_issues: list[dict], timeout_s: int) -> str:
-        # Race the user's POST /resume against a timeout. Timeout == empty guidance (skip).
-        try:
-            return await asyncio.wait_for(queue.get(), timeout=timeout_s)
-        except asyncio.TimeoutError:
-            return ""
+    GUIDANCE_QUEUES[run_id] = asyncio.Queue()
+    LIVE_RUNS[run_id] = {
+        "task": None,
+        "subscribers": [],
+        "done": False,
+        "started_at": datetime.utcnow().isoformat() + "Z",
+    }
 
-    orch = Orchestrator()
+    # CRITICAL: subscribe BEFORE spawning the orchestrator task so the very
+    # first emitted event reaches this client. If we created the task first,
+    # the event loop could run it before _subscribe_sse appends our queue,
+    # and early events (including run_started) would broadcast to an empty
+    # subscriber list and be lost.
+    subq: asyncio.Queue = asyncio.Queue()
+    LIVE_RUNS[run_id]["subscribers"].append(subq)
 
-    async def event_gen():
-        try:
-            async for ev in orch.run(idea, run_id=run_id, guidance_fn=guidance_fn, max_iterations=max_iterations):
-                yield {"event": ev["event"], "data": json.dumps(ev["data"])}
-        except Exception as e:
-            yield {"event": "error", "data": json.dumps({"message": str(e)})}
-        finally:
-            GUIDANCE_QUEUES.pop(run_id, None)
+    LIVE_RUNS[run_id]["task"] = asyncio.create_task(
+        _run_orchestrator(idea, run_id, max_iterations)
+    )
 
-    return EventSourceResponse(event_gen())
+    return EventSourceResponse(
+        _drain_subscriber(run_id, subq),
+        ping=SSE_PING_S,
+    )
+
+
+async def _drain_subscriber(run_id: str, subq: asyncio.Queue):
+    """SSE generator that drains a pre-attached subscriber queue."""
+    run_state = LIVE_RUNS.get(run_id)
+    try:
+        while True:
+            ev = await subq.get()
+            if ev.get("event") == "__END__":
+                break
+            yield {"event": ev["event"], "data": json.dumps(ev["data"])}
+    finally:
+        if run_state is not None:
+            try:
+                run_state["subscribers"].remove(subq)
+            except ValueError:
+                pass
+
+
+@app.get("/stream/{run_id}")
+async def stream(run_id: str):
+    """Reconnect to an in-flight run. Subscribe FIRST (sync), then the
+    generator replays on-disk history before draining the live queue.
+    """
+    run_state = LIVE_RUNS.get(run_id)
+    subq: asyncio.Queue | None = None
+    if run_state and not run_state["done"]:
+        subq = asyncio.Queue()
+        run_state["subscribers"].append(subq)
+    return EventSourceResponse(_subscribe_sse(run_id, subq), ping=SSE_PING_S)
+
+
+async def _subscribe_sse(run_id: str, subq: asyncio.Queue | None):
+    """SSE generator for /stream/<run_id> reconnects.
+
+    Caller must have already appended `subq` to the run's subscribers list
+    (done synchronously in the endpoint before this generator runs).
+
+    Replays on-disk events.ndjson first, then drains live events from subq.
+    """
+    run_state = LIVE_RUNS.get(run_id)
+    try:
+        events_path = RUNS_DIR / run_id / "events.ndjson"
+        if events_path.is_file():
+            try:
+                for line in events_path.read_text().splitlines():
+                    if not line.strip():
+                        continue
+                    rec = json.loads(line)
+                    yield {"event": rec["type"], "data": json.dumps(rec.get("data", {}))}
+            except Exception as e:
+                yield {"event": "error", "data": json.dumps({"message": f"Replay failed: {e}"})}
+
+        if subq is None:
+            # Run already completed — replay covered everything.
+            return
+
+        while True:
+            ev = await subq.get()
+            if ev.get("event") == "__END__":
+                break
+            yield {"event": ev["event"], "data": json.dumps(ev["data"])}
+    finally:
+        if subq is not None and run_state is not None:
+            try:
+                run_state["subscribers"].remove(subq)
+            except ValueError:
+                pass
+
+
 
 
 RUNS_DIR = Path(__file__).resolve().parent.parent / "runs"
@@ -148,3 +278,22 @@ async def resume(run_id: str, request: Request):
     guidance = (body.get("guidance") or "").strip()
     await queue.put(guidance)
     return JSONResponse({"ok": True, "skipped": guidance == ""})
+
+
+@app.get("/runs/{run_id}/report.pdf")
+async def report_pdf(run_id: str):
+    """Bundle a completed run into a single PDF: cover + BRD + evolution + VC."""
+    run_dir = RUNS_DIR / run_id
+    if not (run_dir / "run.json").is_file():
+        raise HTTPException(status_code=404, detail="Run not found or not yet finalized.")
+    if not (run_dir / "final-brd.md").is_file():
+        raise HTTPException(status_code=409, detail="Run is not complete; no final BRD yet.")
+    try:
+        pdf_bytes = render_run_pdf(run_dir)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF render failed: {e}") from e
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="minority-report-{run_id}.pdf"'},
+    )
