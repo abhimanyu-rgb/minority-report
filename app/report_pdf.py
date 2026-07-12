@@ -416,12 +416,12 @@ def _render_vc_html(vc_data: dict) -> str:
         parts.append(f'<p><strong>Why matched.</strong> {html.escape(m.get("match_reason", ""))}</p>')
 
         likes = memo.get("what_we_like") or []
-        concerns = memo.get("what_concerns_us") or []
+        concerns = memo.get("to_iron_out") or memo.get("what_concerns_us") or []
         parts.append('<div class="col-grid">')
         parts.append('<div class="col"><h4>What we like</h4><ul>')
         parts.extend(f'<li>{html.escape(b)}</li>' for b in likes)
         parts.append('</ul></div>')
-        parts.append('<div class="col"><h4>What concerns us</h4><ul>')
+        parts.append('<div class="col"><h4>To iron out</h4><ul>')
         parts.extend(f'<li>{html.escape(b)}</li>' for b in concerns)
         parts.append('</ul></div>')
         parts.append('</div>')
@@ -519,13 +519,15 @@ def render_run_pdf(run_dir: Path) -> bytes:
         </section>
         """
 
-    vc_section = f"""
-    <section class="section">
-      <div class="section-label">Section 3</div>
-      <h1>VC Consideration</h1>
-      {_render_vc_html(vc_data)}
-    </section>
-    """
+    vc_section = ""
+    if vc_data:
+        vc_section = f"""
+        <section class="section">
+          <div class="section-label">Section 3</div>
+          <h1>VC Consideration</h1>
+          {_render_vc_html(vc_data)}
+        </section>
+        """
 
     document = f"""<!doctype html>
     <html><head><meta charset="utf-8"><title>Minority Report</title></head>

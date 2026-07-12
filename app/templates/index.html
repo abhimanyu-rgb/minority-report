@@ -6,7 +6,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css?v={{ asset_version }}" />
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
@@ -29,21 +29,91 @@
   </header>
 
   <main>
+    <nav class="tabs" id="tabs">
+      <button class="tab active" data-tab="run">// New run</button>
+      <button class="tab" data-tab="my-runs">// My runs</button>
+      <button class="tab" data-tab="user-analytics">// My analytics</button>
+      <button class="tab hidden" data-tab="rubric" id="rubricTab">// My rubric</button>
+      <button class="tab hidden" data-tab="admin" id="adminTab">// Admin</button>
+    </nav>
+
+    <div class="identity-strip" id="identityStrip">
+      <span class="identity-label">// Signed in as</span>
+      <span class="identity-name" id="identityName">—</span>
+      <span class="identity-persona" id="identityPersona">—</span>
+      <button class="identity-change" id="identityChangeBtn" type="button">change</button>
+    </div>
+
     <section class="intake" id="intake">
       <label for="idea">// Business idea</label>
-      <textarea id="idea" rows="6" placeholder="e.g. A subscription service that ships a curated box of locally-roasted coffee beans to office break rooms, with usage-based reorder."></textarea>
+
+      <div class="upload-zone" id="uploadZone">
+        <input type="file" id="uploadInput" accept=".pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown" hidden />
+        <div class="upload-hint">
+          <span class="upload-icon">⇪</span>
+          <div>
+            <strong>Drop a BRD / idea doc here</strong> or
+            <button type="button" id="uploadBrowseBtn" class="link-btn">browse</button>
+            <div class="upload-sub">PDF · DOCX · TXT · MD &nbsp;·&nbsp; up to 10 MB &nbsp;·&nbsp; or just type below</div>
+          </div>
+        </div>
+        <div class="upload-status hidden" id="uploadStatus"></div>
+      </div>
+
+      <textarea id="idea" rows="6" placeholder="What's your angle on this? e.g. 'Evaluate this as a seed-stage investor' or 'Tighten the GTM section and find the gaps'. Leave blank to evaluate the attached file as-is."></textarea>
+
+      <div class="attachment-chip hidden" id="attachmentChip">
+        <span class="ac-icon">📎</span>
+        <div class="ac-body">
+          <div class="ac-title" id="acTitle">filename.pdf</div>
+          <div class="ac-meta" id="acMeta">— pages · raw — KB · brief — KB</div>
+        </div>
+        <button type="button" class="ac-btn" id="acViewBriefBtn" title="See what the system understood from this file">View brief</button>
+        <button type="button" class="ac-btn danger" id="acRemoveBtn" title="Remove attachment">Remove</button>
+      </div>
+
+      <details class="raw-extract hidden" id="briefRevealDetails">
+        <summary>// What the system extracted from your file</summary>
+        <div class="raw-extract-pre" id="briefRevealPre"></div>
+      </details>
+
+      <div class="tag-row">
+        <div class="tag-field">
+          <label for="tagSector">// Sector</label>
+          <select id="tagSector"></select>
+        </div>
+        <div class="tag-field">
+          <label for="tagStage">// Stage</label>
+          <select id="tagStage"></select>
+        </div>
+        <div class="tag-field tag-field-wide">
+          <label for="tagTheme">// Theme (optional)</label>
+          <input type="text" id="tagTheme" placeholder="e.g. AI-native PIM, India SMB, longevity supplements" />
+        </div>
+      </div>
 
       <div class="iter-row">
         <label for="maxIterations">// Max iterations</label>
-        <input type="number" id="maxIterations" min="1" max="20" value="5" />
+        <input type="number" id="maxIterations" min="1" max="20" value="3" />
         <span class="hint">Loop stops earlier if green-lit (score ≥ 80, zero red flags). Otherwise runs this many rounds, then publishes the best draft.</span>
+      </div>
+
+      <div class="iter-row vc-toggle-row">
+        <label for="vcEnabled" class="checkbox-label">
+          <input type="checkbox" id="vcEnabled" checked />
+          <span>// Run VC consideration after final BRD</span>
+        </label>
+        <span class="hint">Matches top 3 stage-fit VCs, generates partner memos, synthesizes consensus. Turn off to stop after the brainstorm + evolution report.</span>
       </div>
 
       <button id="processBtn">Process this idea</button>
     </section>
 
     <section class="run hidden" id="run">
-      <div class="status" id="status">Connecting…</div>
+      <div class="status-row">
+        <div class="status" id="status">Connecting…</div>
+        <button class="stop-btn hidden" id="stopBtn" type="button" title="Stop this run and delete its partial output">⏹ Stop run</button>
+      </div>
       <div class="run-cost" id="runCost"><span class="cs-label">THIS RUN</span> <span class="cs-val" id="runCostVal">$0.00</span></div>
       <div id="iterations"></div>
 
@@ -76,6 +146,17 @@
       <h2>Final BRD <span class="score" id="finalScore"></span></h2>
       <div id="finalBrd" class="brd"></div>
 
+      <section class="refine-panel hidden" id="refinePanel">
+        <h3>// Refine — chat with this BRD</h3>
+        <p class="hint">Ask for edits, tightening, stress-tests, or follow-up analysis. Conversation is saved with this run.</p>
+        <div class="refine-thread" id="refineThread"></div>
+        <div class="refine-input-row">
+          <textarea id="refineInput" rows="2" placeholder="e.g. Tighten the unit economics. Or: stress-test the 90-day GTM. Or: add a competitive matrix."></textarea>
+          <button id="refineSendBtn" type="button">Send</button>
+        </div>
+        <div class="refine-status" id="refineStatus"></div>
+      </section>
+
       <details open id="evolutionDetails" class="evolution">
         <summary>// Evolution report — what improved the BRD from v1 to final</summary>
         <div id="evolutionReport" class="brd"></div>
@@ -99,10 +180,348 @@
           <div class="sub">Cover · Final BRD · Evolution · VC consideration</div>
         </div>
         <a id="downloadPdfBtn" href="#" download class="download-btn">Download PDF</a>
+        <button type="button" class="new-idea-btn" id="newIdeaBtn" title="Clear everything and start fresh">+ New idea</button>
+      </div>
+
+      <div class="feedback-panel hidden" id="feedbackPanel">
+        <div class="feedback-head">
+          <div>
+            <h3>// Was this useful?</h3>
+            <p class="hint">Your rating + notes feed back into the premortem's failure-pattern memory. After 10 ratings, 👎 runs stop contributing to the priors.</p>
+          </div>
+        </div>
+        <div class="feedback-rating">
+          <button type="button" class="rating-btn" data-rating="up" id="ratingUp">👍 Useful</button>
+          <button type="button" class="rating-btn" data-rating="down" id="ratingDown">👎 Off-base</button>
+          <button type="button" class="rating-btn rating-acted" data-rating="acted_on" id="ratingActed">✅ Acted on it</button>
+        </div>
+        <div class="feedback-meta-row">
+          <label for="feedbackMostUseful" class="feedback-sublabel">// Most useful iteration (optional)</label>
+          <select id="feedbackMostUseful"><option value="">—</option></select>
+        </div>
+        <label for="feedbackNote" class="feedback-sublabel">// What worked, what didn't, what was off?</label>
+        <textarea id="feedbackNote" rows="3" placeholder="e.g. Iteration 2 nailed the GTM but the monetization model in v3 was wrong."></textarea>
+        <div class="feedback-actions">
+          <button id="feedbackSubmitBtn" disabled>Submit feedback</button>
+          <span class="feedback-status" id="feedbackStatus"></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="analytics hidden" id="myRunsPanel">
+      <div class="analytics-head">
+        <h2>// My runs</h2>
+        <button class="secondary" id="myRunsRefreshBtn">Refresh</button>
+      </div>
+      <div class="runs-filter">
+        <input type="text" id="runsSearch" placeholder="Search title / theme / idea…" />
+        <select id="runsFilterSector"><option value="">All sectors</option></select>
+        <select id="runsFilterStage"><option value="">All stages</option></select>
+        <select id="runsFilterOutcome">
+          <option value="">All outcomes</option>
+          <option value="unset">Unset</option>
+          <option value="advanced">Advanced</option>
+          <option value="passed">Passed</option>
+          <option value="invested">Invested</option>
+          <option value="declined">Declined</option>
+          <option value="built">Built</option>
+          <option value="pivoted">Pivoted</option>
+          <option value="killed">Killed</option>
+        </select>
+      </div>
+      <ul class="run-list large" id="myRunsList"></ul>
+    </section>
+
+    <section class="analytics hidden" id="rubricPanel">
+      <div class="analytics-head">
+        <h2>// My rubric <span class="user-tag" id="rubricPersonaTag"></span></h2>
+        <button class="secondary" id="rubricResetBtn">Reset to default</button>
+      </div>
+      <p class="hint">Tilt the premortem's emphasis to match how you actually evaluate companies. Investor-only. Weights must sum to ~100.</p>
+
+      <div class="rubric-slider-group">
+        <div class="rubric-slider">
+          <label>Market <span id="rubricMarketVal" class="rubric-pct">34%</span></label>
+          <input type="range" id="rubricMarket" min="0" max="100" value="34" />
+        </div>
+        <div class="rubric-slider">
+          <label>Feasibility <span id="rubricFeasibilityVal" class="rubric-pct">33%</span></label>
+          <input type="range" id="rubricFeasibility" min="0" max="100" value="33" />
+        </div>
+        <div class="rubric-slider">
+          <label>Founder / team <span id="rubricFounderVal" class="rubric-pct">33%</span></label>
+          <input type="range" id="rubricFounder" min="0" max="100" value="33" />
+        </div>
+      </div>
+
+      <div class="rubric-sum">
+        Total: <span id="rubricTotal">100%</span>
+        <span class="rubric-sum-warn hidden" id="rubricSumWarn">Must sum to ~100 to save.</span>
+      </div>
+
+      <div class="rubric-actions">
+        <button id="rubricSaveBtn">Save</button>
+        <span class="feedback-status" id="rubricStatus"></span>
+      </div>
+    </section>
+
+    <section class="analytics hidden" id="userAnalyticsPanel">
+      <div class="analytics-head">
+        <h2>// My analytics <span class="user-tag" id="userAnalyticsWho"></span></h2>
+        <button class="secondary" id="userAnalyticsRefreshBtn">Refresh</button>
+      </div>
+
+      <h3 class="kpi-group-title">// Value delivered</h3>
+      <div class="analytics-grid">
+        <div class="analytics-card highlight">
+          <div class="label">Time saved</div>
+          <div class="big" id="uaTimeSaved">— hrs</div>
+          <div class="sub" id="uaTimeSavedSub">Versus drafting manually</div>
+        </div>
+        <div class="analytics-card">
+          <div class="label">Reports generated</div>
+          <div class="big" id="uaReports">—</div>
+          <div class="sub" id="uaReportsSub">— this month · — this week</div>
+        </div>
+        <div class="analytics-card">
+          <div class="label">Acted-on rate</div>
+          <div class="big" id="uaActedRate">—%</div>
+          <div class="sub" id="uaActedSub">— marked acted-on</div>
+        </div>
+        <div class="analytics-card">
+          <div class="label">Decision velocity</div>
+          <div class="big" id="uaVelocity">—</div>
+          <div class="sub">Reports / week (rolling)</div>
+        </div>
+      </div>
+
+      <h3 class="kpi-group-title">// Output quality</h3>
+      <div class="analytics-grid">
+        <div class="analytics-card">
+          <div class="label">Green-light rate</div>
+          <div class="big" id="uaGreenRate">—%</div>
+          <div class="sub">Score ≥ 80 with zero red flags</div>
+        </div>
+        <div class="analytics-card">
+          <div class="label">Your score trend</div>
+          <div class="big" id="uaTrend">—</div>
+          <div class="sub" id="uaTrendSub">Last vs first run</div>
+        </div>
+      </div>
+
+      <div class="analytics-section">
+        <h3>// Score progression — your runs over time</h3>
+        <div class="sparkline-wrap"><svg id="uaScoreSpark" viewBox="0 0 600 120" preserveAspectRatio="none"></svg></div>
+        <div class="sparkline-axis" id="uaScoreSparkAxis"></div>
+      </div>
+
+      <div class="analytics-section">
+        <h3>// Recurring blind spots — what the system catches in your ideas</h3>
+        <p class="hint">Flag patterns that appeared across your reports. Treat these as your team's gaps to address upstream.</p>
+        <ol class="flag-list" id="uaTopFlags"></ol>
+      </div>
+
+      <div class="analytics-section">
+        <h3>// Recent reports</h3>
+        <ul class="run-list" id="uaRecentRuns"></ul>
+      </div>
+
+      <details class="analytics-section priors-details">
+        <summary>// What patterns are biasing my premortem? <span class="hint" id="uaPriorsMeta"></span></summary>
+        <p class="hint">These flag patterns recur across past runs and are softly injected as a checklist into each premortem. They tighten the review over time. Investors with custom rubric weights also see those reflected in scoring.</p>
+        <ol class="prior-list" id="uaPriorList"></ol>
+      </details>
+    </section>
+
+    <section class="analytics hidden" id="analyticsPanel">
+      <div class="analytics-head">
+        <h2>// Admin · Diagnostics</h2>
+        <div class="analytics-head-actions">
+          <button class="secondary" id="analyticsRefreshBtn">Refresh</button>
+          <button class="secondary" id="adminBackfillEmbedBtn" title="Generate Voyage embeddings for any completed run that doesn't have one yet — enables peer-similarity matching">Backfill embeddings</button>
+          <span class="hint" id="adminBackfillStatus"></span>
+        </div>
+      </div>
+      <p class="hint">Operator view — system health, cost, rubric calibration. Not customer-facing.</p>
+
+      <h3 class="kpi-group-title">// Volume</h3>
+      <div class="analytics-grid">
+        <div class="analytics-card">
+          <div class="label">All-time runs</div>
+          <div class="big" id="anTotalRuns">—</div>
+          <div class="sub" id="anTotalRunsSub">— completed · — green-lit</div>
+        </div>
+        <div class="analytics-card">
+          <div class="label">This month</div>
+          <div class="big" id="anMonthRuns">—</div>
+          <div class="sub" id="anMonthCost">$0.00</div>
+        </div>
+        <div class="analytics-card">
+          <div class="label">All-time cost</div>
+          <div class="big" id="anAllCost">$0.00</div>
+          <div class="sub" id="anWeekCost">$0.00 this week</div>
+        </div>
+        <div class="analytics-card">
+          <div class="label">Feedback ratio</div>
+          <div class="big" id="anFeedback">— · —</div>
+          <div class="sub" id="anFeedbackSub">— ratings</div>
+        </div>
+      </div>
+
+      <h3 class="kpi-group-title">// Cost per report</h3>
+      <div class="analytics-grid">
+        <div class="analytics-card">
+          <div class="label">Avg / run</div>
+          <div class="big" id="kpiAvgCost">$—</div>
+          <div class="sub" id="kpiAvgCostSub">— runs sampled</div>
+        </div>
+        <div class="analytics-card">
+          <div class="label">P50 · P95 / run</div>
+          <div class="big" id="kpiCostP">$— · $—</div>
+          <div class="sub">Median and 95th percentile</div>
+        </div>
+        <div class="analytics-card">
+          <div class="label">Max / run</div>
+          <div class="big" id="kpiMaxCost">$—</div>
+          <div class="sub" id="kpiMinCostSub">Min: $—</div>
+        </div>
+        <div class="analytics-card">
+          <div class="label">Avg / iteration</div>
+          <div class="big" id="kpiAvgIterCost">$—</div>
+          <div class="sub" id="kpiAvgIterCostSub">— iterations sampled</div>
+        </div>
+      </div>
+
+      <h3 class="kpi-group-title">// Quality</h3>
+      <div class="analytics-grid">
+        <div class="analytics-card">
+          <div class="label">Green-light rate</div>
+          <div class="big" id="kpiGreenRate">—%</div>
+          <div class="sub" id="kpiCapHitSub">Cap-hit: —%</div>
+        </div>
+        <div class="analytics-card">
+          <div class="label">Avg final score</div>
+          <div class="big" id="kpiAvgScore">—</div>
+          <div class="sub">Across completed runs</div>
+        </div>
+        <div class="analytics-card">
+          <div class="label">Avg iterations</div>
+          <div class="big" id="kpiAvgIters">—</div>
+          <div class="sub" id="kpiAvgItersSub">Green-lit only: —</div>
+        </div>
+        <div class="analytics-card">
+          <div class="label">Score lift v1 → final</div>
+          <div class="big" id="kpiLift">—</div>
+          <div class="sub" id="kpiLiftSub">— multi-iter runs</div>
+        </div>
+      </div>
+
+      <h3 class="kpi-group-title">// Engagement &amp; speed</h3>
+      <div class="analytics-grid">
+        <div class="analytics-card">
+          <div class="label">Guidance rate at pause</div>
+          <div class="big" id="kpiGuidanceRate">—%</div>
+          <div class="sub" id="kpiGuidanceRateSub">— / — pauses</div>
+        </div>
+        <div class="analytics-card">
+          <div class="label">Avg guidance length</div>
+          <div class="big" id="kpiGuidanceLen">— chars</div>
+          <div class="sub">When users do provide guidance</div>
+        </div>
+        <div class="analytics-card">
+          <div class="label">Avg time / run</div>
+          <div class="big" id="kpiAvgWall">—</div>
+          <div class="sub" id="kpiWallPSub">P95: —</div>
+        </div>
+        <div class="analytics-card">
+          <div class="label">Avg time / iteration</div>
+          <div class="big" id="kpiAvgIterWall">—</div>
+          <div class="sub">Brainstorm + premortem</div>
+        </div>
+      </div>
+
+      <div class="analytics-section">
+        <h3>// 7-day rolling mean score (last 30d)</h3>
+        <div class="sparkline-wrap"><svg id="sparkline" viewBox="0 0 600 120" preserveAspectRatio="none"></svg></div>
+        <div class="sparkline-axis" id="sparklineAxis"></div>
+      </div>
+
+      <div class="analytics-section">
+        <h3>// Score distribution</h3>
+        <div class="histogram" id="histogram"></div>
+      </div>
+
+      <div class="analytics-section">
+        <h3>// Top recurring flags</h3>
+        <ol class="flag-list" id="topFlags"></ol>
+      </div>
+
+      <div class="analytics-section">
+        <h3>// Active priors (injected into the premortem)</h3>
+        <p class="hint" id="priorsMeta">—</p>
+        <ol class="prior-list" id="priorList"></ol>
+      </div>
+
+      <div class="analytics-section">
+        <h3>// Recent feedback notes</h3>
+        <ul class="feedback-notes" id="feedbackNotes"></ul>
+      </div>
+
+      <div class="analytics-section feedback-analysis-section">
+        <div class="fa-head">
+          <div>
+            <h3>// Feedback analysis · product insights</h3>
+            <p class="hint" id="faStatusLine">Loading…</p>
+          </div>
+          <button class="secondary" id="faAnalyzeBtn" disabled>Analyze</button>
+        </div>
+        <div class="fa-body hidden" id="faBody">
+          <div class="fa-meta" id="faMeta"></div>
+          <p class="fa-summary" id="faSummary"></p>
+
+          <div class="fa-sentiment" id="faSentiment"></div>
+
+          <div class="fa-block">
+            <h4>// Recurring themes</h4>
+            <ol class="fa-list" id="faThemes"></ol>
+          </div>
+
+          <div class="fa-block">
+            <h4>// Top complaints</h4>
+            <ol class="fa-list" id="faComplaints"></ol>
+          </div>
+
+          <div class="fa-block">
+            <h4>// Top praises</h4>
+            <ol class="fa-list" id="faPraises"></ol>
+          </div>
+
+          <div class="fa-block">
+            <h4>// Recommended actions</h4>
+            <ol class="fa-list fa-actions" id="faActions"></ol>
+          </div>
+        </div>
       </div>
     </section>
   </main>
 
-  <script src="/static/app.js"></script>
+  <div class="modal hidden" id="identityModal" role="dialog" aria-modal="true">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card">
+      <h2>// Who's running this?</h2>
+      <p class="hint">Your name or email tags each run so the analytics tab shows your work, not someone else's. Stored locally in your browser.</p>
+      <label for="identityNameInput">// Name / email</label>
+      <input type="text" id="identityNameInput" placeholder="abhimanyu@nurix.ai" />
+      <label>// You are a</label>
+      <div class="persona-grid" id="personaGrid">
+        <!-- populated from /personas -->
+      </div>
+      <div class="modal-actions">
+        <button id="identitySaveBtn">Continue</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js?v={{ asset_version }}"></script>
 </body>
 </html>

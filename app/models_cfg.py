@@ -31,6 +31,8 @@ MODELS: dict[str, str] = {
     "vc_match":   os.getenv("VC_MATCH_MODEL",   "claude-haiku-4-5"),
     "vc_eval":    os.getenv("VC_EVAL_MODEL",    "claude-sonnet-4-6"),
     "vc_consensus": os.getenv("VC_CONSENSUS_MODEL", "claude-sonnet-4-6"),
+    "distill":    os.getenv("DISTILL_MODEL",    "claude-haiku-4-5"),
+    "refine":     os.getenv("REFINE_MODEL",     "claude-sonnet-4-6"),
 }
 
 

@@ -51,7 +51,7 @@ from .models_cfg import MODELS, Usage, usage_from_response
 # Back-compat aliases (still referenced in some metadata writes).
 BRAINSTORM_MODEL = MODELS["brainstorm"]
 PREMORTEM_MODEL = MODELS["premortem"]
-DEFAULT_MAX_ITERATIONS = int(os.getenv("MAX_ITERATIONS", "5"))
+DEFAULT_MAX_ITERATIONS = int(os.getenv("MAX_ITERATIONS", "3"))
 SCORE_THRESHOLD = int(os.getenv("SCORE_THRESHOLD", "80"))
 
 RUNS_DIR = Path(__file__).resolve().parent.parent / "runs"
@@ -137,17 +137,116 @@ class RunLogger:
 
 
 def _extract_json(text: str) -> dict:
-    """Pull the first JSON object out of model output, tolerating fences."""
+    """Pull the first JSON object out of model output, tolerating fences and
+    common emit defects. Tries (in order):
+
+      1. Direct parse of the obvious {...} slice.
+      2. Strip trailing commentary after the last balanced }.
+      3. Common repair: drop trailing commas; replace smart quotes.
+
+    Raises ValueError if all attempts fail.
+    """
     text = text.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
-    # Greedy match from first { to last }.
     start = text.find("{")
     end = text.rfind("}")
     if start == -1 or end == -1:
         raise ValueError(f"No JSON object found in:\n{text[:500]}")
-    return json.loads(text[start : end + 1])
+    candidate = text[start : end + 1]
+
+    # Attempt 1: as-is
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        pass
+
+    # Attempt 2: trailing-comma repair + smart-quote replacement
+    repaired = re.sub(r",(\s*[}\]])", r"\1", candidate)
+    repaired = repaired.replace("“", '"').replace("”", '"')
+    repaired = repaired.replace("‘", "'").replace("’", "'")
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
+        pass
+
+    # Attempt 3: balanced-brace walk to find the largest valid JSON prefix
+    depth = 0
+    last_valid = -1
+    in_str = False
+    esc = False
+    for i, ch in enumerate(candidate):
+        if esc:
+            esc = False
+            continue
+        if ch == "\\":
+            esc = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                last_valid = i
+    if last_valid > 0:
+        try:
+            return json.loads(candidate[: last_valid + 1])
+        except json.JSONDecodeError:
+            pass
+
+    raise ValueError(f"Could not parse JSON from:\n{candidate[:600]}")
+
+
+# Anthropic SDK exceptions we treat as retryable.
+RETRYABLE_API_ERROR_NAMES = {
+    "APIConnectionError",
+    "APITimeoutError",
+    "APIStatusError",  # base class for 5xx
+    "RateLimitError",
+    "InternalServerError",
+    "ServiceUnavailableError",
+}
+
+
+async def _retry_api_call(coro_fn, *, max_attempts: int = 4, base_delay: float = 2.0):
+    """Run an async API call with exponential backoff.
+
+    `coro_fn` must be a zero-arg callable returning a fresh coroutine each call.
+    Backoff: 2s, 4s, 8s. Honors Anthropic's Retry-After when present.
+    """
+    import inspect
+    last_exc = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return await coro_fn()
+        except Exception as e:  # noqa: BLE001
+            name = type(e).__name__
+            retryable = name in RETRYABLE_API_ERROR_NAMES or (
+                hasattr(e, "status_code") and getattr(e, "status_code", 0) in (408, 429, 500, 502, 503, 504, 529)
+            )
+            if not retryable or attempt == max_attempts:
+                raise
+            last_exc = e
+            # Try to honor Retry-After header if present on the exception.
+            retry_after = None
+            resp = getattr(e, "response", None)
+            if resp is not None and hasattr(resp, "headers"):
+                ra = resp.headers.get("retry-after")
+                if ra:
+                    try:
+                        retry_after = float(ra)
+                    except ValueError:
+                        retry_after = None
+            delay = retry_after if retry_after is not None else (base_delay * (2 ** (attempt - 1)))
+            await asyncio.sleep(min(delay, 30.0))
+    if last_exc:
+        raise last_exc
 
 
 def _top_strategic_issues(p: Premortem, k: int = 5) -> list[Flag]:
@@ -179,9 +278,15 @@ class Orchestrator:
     def __init__(self) -> None:
         self.client = AsyncAnthropic()
 
+    async def _messages_create(self, **kwargs):
+        """All Anthropic calls go through here so they get retry + backoff."""
+        async def _call():
+            return await self.client.messages.create(**kwargs)
+        return await _retry_api_call(_call)
+
     async def _brainstorm(self, user_msg: str) -> tuple[str, Usage]:
         model = MODELS["brainstorm"]
-        resp = await self.client.messages.create(
+        resp = await self._messages_create(
             model=model,
             max_tokens=8000,
             system=BRAINSTORM_SYSTEM,
@@ -196,7 +301,7 @@ class Orchestrator:
             {k: v for k, v in p.items() if k in ("id", "firm", "thesis", "what_they_fund", "sectors", "stage_focus")}
             for p in vc_db
         ]
-        resp = await self.client.messages.create(
+        resp = await self._messages_create(
             model=model,
             max_tokens=1500,
             system=VC_MATCH_SYSTEM,
@@ -216,18 +321,19 @@ class Orchestrator:
             resolved.append({"profile": profile, "reason": m.get("reason", "")})
         return resolved, usage_from_response(model, resp)
 
-    async def _vc_eval(self, brd: str, profile: dict, final_score: int, final_summary: str) -> tuple[dict, Usage]:
+    async def _vc_eval(self, brd: str, profile: dict, final_score: int, final_summary: str,
+                       corpus_exemplars: str = "") -> tuple[dict, Usage]:
         model = MODELS["vc_eval"]
-        resp = await self.client.messages.create(
+        user_msg = VC_EVAL_USER.format(
+            brd=brd, final_score=final_score, final_premortem_summary=final_summary
+        )
+        if corpus_exemplars.strip():
+            user_msg = corpus_exemplars + "\n\n" + user_msg
+        resp = await self._messages_create(
             model=model,
             max_tokens=3000,
             system=VC_EVAL_SYSTEM.format(profile=json.dumps(profile, indent=2)),
-            messages=[{
-                "role": "user",
-                "content": VC_EVAL_USER.format(
-                    brd=brd, final_score=final_score, final_premortem_summary=final_summary
-                ),
-            }],
+            messages=[{"role": "user", "content": user_msg}],
         )
         return _extract_json(resp.content[0].text), usage_from_response(model, resp)
 
@@ -244,12 +350,12 @@ class Orchestrator:
                 "seed_valuation_high_usd": m["eval"]["seed_valuation_high_usd"],
                 "check_size_usd": m["eval"]["check_size_usd"],
                 "what_we_like": m["eval"]["memo"]["what_we_like"],
-                "what_concerns_us": m["eval"]["memo"]["what_concerns_us"],
+                "to_iron_out": m["eval"]["memo"].get("to_iron_out") or m["eval"]["memo"].get("what_concerns_us") or [],
                 "deal_breakers": m["eval"]["memo"]["deal_breakers"],
                 "valuation_rationale": m["eval"]["memo"]["valuation_rationale"],
             })
         model = MODELS["vc_consensus"]
-        resp = await self.client.messages.create(
+        resp = await self._messages_create(
             model=model,
             max_tokens=1500,
             system=VC_CONSENSUS_SYSTEM,
@@ -283,7 +389,7 @@ class Orchestrator:
         history_block = "\n".join(blocks)
 
         model = MODELS["evolution"]
-        resp = await self.client.messages.create(
+        resp = await self._messages_create(
             model=model,
             max_tokens=4000,
             system=EVOLUTION_SYSTEM,
@@ -300,13 +406,19 @@ class Orchestrator:
         )
         return resp.content[0].text, usage_from_response(model, resp)
 
-    async def _premortem(self, brd: str) -> tuple[Premortem, Usage]:
+    async def _premortem(self, brd: str, weights_block: str = "", user_id: str | None = None) -> tuple[Premortem, Usage]:
         model = MODELS["premortem"]
-        resp = await self.client.messages.create(
+        from .learning import get_premortem_priors_block
+        from .calibration import calibration_block
+        priors_block = get_premortem_priors_block()
+        cal_block = calibration_block(user_id)
+        # Append calibration to priors so the existing slot carries both.
+        combined_priors = priors_block + ("\n" + cal_block if cal_block else "")
+        resp = await self._messages_create(
             model=model,
             max_tokens=4000,
             system=PREMORTEM_SYSTEM,
-            messages=[{"role": "user", "content": PREMORTEM_USER.format(brd=brd)}],
+            messages=[{"role": "user", "content": PREMORTEM_USER.format(brd=brd, priors_block=combined_priors, weights_block=weights_block)}],
         )
         raw = resp.content[0].text
         data = _extract_json(raw)
@@ -325,9 +437,17 @@ class Orchestrator:
         run_id: str,
         guidance_fn: GuidanceFn | None = None,
         max_iterations: int | None = None,
+        vc_enabled: bool = True,
+        attribution: dict | None = None,
     ) -> AsyncIterator[dict]:
         max_iter = max(1, min(20, int(max_iterations if max_iterations is not None else DEFAULT_MAX_ITERATIONS)))
         run_dir = RUNS_DIR / run_id
+
+        # Resolve the user's tuned rubric weights (investor persona only).
+        from .rubric import get_weights, render_weights_block
+        attr = attribution or {}
+        weights = get_weights(attr.get("user_id"))
+        weights_block = render_weights_block(weights, attr.get("persona") or "founder")
 
         # Hard refusal to overwrite an existing run.
         if run_dir.exists() and any(run_dir.iterdir()):
@@ -434,7 +554,7 @@ class Orchestrator:
                     started_at=premortem_started_at,
                     model=MODELS["premortem"],
                 )
-                premortem, premortem_usage = await self._premortem(brd)
+                premortem, premortem_usage = await self._premortem(brd, weights_block=weights_block, user_id=attr.get("user_id"))
                 pu = record_usage("premortem", premortem_usage, iteration_id)
                 premortem_finished_at = _now_iso()
                 premortem_dict = _premortem_to_dict(premortem)
@@ -515,6 +635,18 @@ class Orchestrator:
                     (iter_dir / "guidance.txt").write_text(pending_guidance)
                     # Backward-compat flat path.
                     (run_dir / f"guidance-after-v{n}.txt").write_text(pending_guidance)
+                    # Tier 1.3 — record per-user calibration signal from this
+                    # guidance turn vs the flags they just saw. Best-effort.
+                    try:
+                        from .calibration import record_interaction
+                        from .learning import _norm_key as _nk
+                        uid = (attr.get("user_id") or "").strip()
+                        if uid and uid != "anonymous":
+                            for f in top_issues:
+                                key = _nk(f.get("section", ""), f.get("title", ""))
+                                record_interaction(uid, key, pending_guidance)
+                    except Exception:
+                        pass
                     yield emit(
                         "guidance_received",
                         n=n,
@@ -526,12 +658,18 @@ class Orchestrator:
                 # Rewrite sidecar so the guidance-after field is captured.
                 _write_iter_sidecar(iter_dir, iteration, run_id, premortem_dict)
 
-            # Pick final: latest if green-lit, else best-scoring.
+            # Pick final.
+            #   - If the last iteration is green-lit, take it.
+            #   - Otherwise take the highest-scoring iteration; on a score tie,
+            #     prefer the LATER iteration (more rounds of guidance/feedback
+            #     have been folded in, so the later draft is the more refined
+            #     one). max() returns the first match on ties, so we walk
+            #     iterations in reverse to bias toward latest-on-tie.
             if iterations[-1].premortem.is_green_lit():
                 final = iterations[-1]
                 warning = None
             else:
-                final = max(iterations, key=lambda it: it.premortem.score)
+                final = max(reversed(iterations), key=lambda it: it.premortem.score)
                 warning = (
                     f"Did not meet the bar (score ≥ {SCORE_THRESHOLD} and zero red flags) "
                     f"after {len(iterations)} iterations. Publishing the best-scoring draft "
@@ -553,52 +691,84 @@ class Orchestrator:
             yield emit("evolution_report_done", report=evolution_report, usage=evo_usage_dict)
 
             # VC consideration stage: match top 3 firms, run partner memos in parallel, synthesize consensus.
-            try:
-                yield emit("vc_stage_started")
-                vc_db = json.loads(VC_PROFILES_PATH.read_text())
-                yield emit("vc_matching", model=MODELS["vc_match"])
-                matched, match_usage = await self._vc_match(final.brd, vc_db)
-                record_usage("vc_match", match_usage)
-                yield emit(
-                    "vc_matched",
-                    matches=[{"firm": m["profile"]["firm"], "id": m["profile"]["id"], "reason": m["reason"]} for m in matched],
-                    usage=match_usage.to_dict(),
-                )
-
-                yield emit("vc_evaluating", count=len(matched), model=MODELS["vc_eval"])
-                evals = await asyncio.gather(
-                    *[self._vc_eval(final.brd, m["profile"], final.premortem.score, final.premortem.summary) for m in matched],
-                    return_exceptions=True,
-                )
-                memos: list[dict] = []
-                for m, e in zip(matched, evals):
-                    if isinstance(e, Exception):
-                        yield emit("vc_eval_error", firm=m["profile"]["firm"], message=str(e))
-                        continue
-                    eval_payload, eval_usage = e
-                    eu = record_usage("vc_eval", eval_usage)
-                    memos.append({"profile": m["profile"], "match_reason": m["reason"], "eval": eval_payload})
+            if not vc_enabled:
+                yield emit("vc_skipped", reason="User disabled VC consideration for this run.")
+            else:
+                try:
+                    yield emit("vc_stage_started")
+                    vc_db = json.loads(VC_PROFILES_PATH.read_text())
+                    yield emit("vc_matching", model=MODELS["vc_match"])
+                    matched, match_usage = await self._vc_match(final.brd, vc_db)
+                    record_usage("vc_match", match_usage)
                     yield emit(
-                        "vc_eval_done",
-                        firm=m["profile"]["firm"],
-                        eval=eval_payload,
-                        match_reason=m["reason"],
-                        profile=m["profile"],
-                        usage=eu,
+                        "vc_matched",
+                        matches=[{"firm": m["profile"]["firm"], "id": m["profile"]["id"], "reason": m["reason"]} for m in matched],
+                        usage=match_usage.to_dict(),
                     )
 
-                consensus = None
-                if len(memos) >= 2:
-                    yield emit("vc_consensus_started", model=MODELS["vc_consensus"])
-                    consensus, consensus_usage = await self._vc_consensus(memos)
-                    cu = record_usage("vc_consensus", consensus_usage)
-                    yield emit("vc_consensus_done", consensus=consensus, usage=cu)
+                    # Tier 1.4 — if the requesting user owns a vc_memo / past_pitch
+                    # corpus, fetch top-3 semantically similar items relative to
+                    # this BRD and inject as exemplars so the VC eval reflects
+                    # the firm's actual voice / criteria.
+                    exemplars_block = ""
+                    try:
+                        from .embeddings import is_available, embed
+                        from .run_index import similar_corpus_items
+                        uid = (attr.get("user_id") or "").strip()
+                        if is_available() and uid and uid != "anonymous":
+                            q = await embed(final.brd, input_type="query")
+                            ex_items = similar_corpus_items(
+                                q["vector"], owner_user_id=uid, kind="vc_memo", top_k=3, min_cosine=0.3
+                            )
+                            if not ex_items:
+                                ex_items = similar_corpus_items(
+                                    q["vector"], owner_user_id=uid, kind="investment_criteria",
+                                    top_k=3, min_cosine=0.3,
+                                )
+                            if ex_items:
+                                parts = ["## Your firm's exemplar memos / criteria",
+                                         "Reference these in tone and rubric. Treat them as ground truth for *how your firm evaluates*."]
+                                for ex in ex_items:
+                                    parts.append(f"\n### {ex.get('label') or ex.get('title')} (sim {ex['similarity']})")
+                                    parts.append(ex.get("content", "")[:2000])
+                                exemplars_block = "\n".join(parts)
+                    except Exception:
+                        exemplars_block = ""
 
-                vc_data = {"memos": memos, "consensus": consensus}
-                (run_dir / "vc-evaluation.json").write_text(json.dumps(vc_data, indent=2))
-                (run_dir / "vc-evaluation.md").write_text(_render_vc_markdown(vc_data))
-            except Exception as e:
-                yield emit("vc_stage_error", message=str(e))
+                    yield emit("vc_evaluating", count=len(matched), model=MODELS["vc_eval"])
+                    evals = await asyncio.gather(
+                        *[self._vc_eval(final.brd, m["profile"], final.premortem.score, final.premortem.summary, corpus_exemplars=exemplars_block) for m in matched],
+                        return_exceptions=True,
+                    )
+                    memos: list[dict] = []
+                    for m, e in zip(matched, evals):
+                        if isinstance(e, Exception):
+                            yield emit("vc_eval_error", firm=m["profile"]["firm"], message=str(e))
+                            continue
+                        eval_payload, eval_usage = e
+                        eu = record_usage("vc_eval", eval_usage)
+                        memos.append({"profile": m["profile"], "match_reason": m["reason"], "eval": eval_payload})
+                        yield emit(
+                            "vc_eval_done",
+                            firm=m["profile"]["firm"],
+                            eval=eval_payload,
+                            match_reason=m["reason"],
+                            profile=m["profile"],
+                            usage=eu,
+                        )
+
+                    consensus = None
+                    if len(memos) >= 2:
+                        yield emit("vc_consensus_started", model=MODELS["vc_consensus"])
+                        consensus, consensus_usage = await self._vc_consensus(memos)
+                        cu = record_usage("vc_consensus", consensus_usage)
+                        yield emit("vc_consensus_done", consensus=consensus, usage=cu)
+
+                    vc_data = {"memos": memos, "consensus": consensus}
+                    (run_dir / "vc-evaluation.json").write_text(json.dumps(vc_data, indent=2))
+                    (run_dir / "vc-evaluation.md").write_text(_render_vc_markdown(vc_data))
+                except Exception as e:
+                    yield emit("vc_stage_error", message=str(e))
 
             status = "completed"
 
@@ -648,10 +818,39 @@ class Orchestrator:
                     status=status,
                     error=error_msg,
                     run_usages=run_usages,
+                    vc_enabled=vc_enabled,
+                    attribution=attribution or {"user_id": "anonymous", "persona": "founder"},
                 )
             except Exception:
                 pass
             logger.close()
+            # Rebuild the cross-run flag-pattern index so the next premortem
+            # picks up this run's signal. Best-effort; never blocks the run.
+            try:
+                from .learning import rebuild_flag_patterns
+                rebuild_flag_patterns()
+            except Exception:
+                pass
+            # Sync into the SQLite runs index for fast list/search.
+            try:
+                from .run_index import upsert_run, set_run_embedding
+                upsert_run(run_id)
+            except Exception:
+                pass
+            # Best-effort: embed the final BRD so this run participates in
+            # similarity search for future peer-run / corpora matching.
+            # Failures here NEVER block the run from completing.
+            try:
+                from .embeddings import is_available, embed
+                from pathlib import Path as _P
+                brd_path = run_dir / "final-brd.md"
+                if is_available() and brd_path.is_file() and status == "completed":
+                    text = brd_path.read_text()
+                    result = await embed(text, input_type="document")
+                    set_run_embedding(run_id, result["vector"], result["model"])
+            except Exception:
+                # Quietly skip; logs would be nice eventually.
+                pass
 
 
 def _fmt_usd(n: int | None) -> str:
@@ -709,8 +908,8 @@ def _render_vc_markdown(vc_data: dict) -> str:
         for b in memo.get("what_we_like", []):
             lines.append(f"- {b}")
         lines.append("")
-        lines.append("**What concerns us:**")
-        for b in memo.get("what_concerns_us", []):
+        lines.append("**To iron out:**")
+        for b in (memo.get("to_iron_out") or memo.get("what_concerns_us") or []):
             lines.append(f"- {b}")
         lines.append("")
         lines.append(f"**Founder / team lens.** {memo['founder_team_lens']}")
@@ -763,6 +962,8 @@ def _write_run_manifest(
     status: str,  # "completed" | "aborted" | "errored"
     error: str | None = None,
     run_usages: list[dict] | None = None,
+    vc_enabled: bool = True,
+    attribution: dict | None = None,
 ) -> None:
     """Write run.json — the top-level manifest. Resilient: works with partial state.
 
@@ -784,13 +985,15 @@ def _write_run_manifest(
 
     manifest = {
         "run_id": run_id,
-        "schema_version": 2,
+        "schema_version": 3,
         "status": status,
+        "attribution": attribution or {"user_id": "anonymous", "persona": "founder"},
         "started_at": started_at,
         "finished_at": finished_at,
         "settings": {
             "max_iterations": max_iter,
             "score_threshold": threshold,
+            "vc_enabled": vc_enabled,
             "models": dict(MODELS),
         },
         "idea": idea,

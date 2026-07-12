@@ -1,22 +1,24 @@
 """Prompts for the brainstorm + premortem loop.
 
-The technical-brainstorm SKILL.md is interactive (slash commands, multi-turn,
-pillar files). For an automated one-shot loop we distill its *philosophy* into
-a single prompt: structured BRD output, present-tense, decisions carry Why +
-How-to-apply, references over invention, explicit non-goals and rejected
-alternatives, milestones with blocking questions.
+The brainstorm SKILL.md is interactive (slash commands, multi-turn, pillar
+files). For an automated one-shot loop we distill its *philosophy* into a
+single prompt: think first, then file; decisions carry Why + How-to-apply;
+references over invention; explicit non-goals vs rejected vs backlog;
+questions in the user's framing as the only convergence currency; Build mode
+(greenfield / brownfield / hybrid) is a brainstorm-phase concern, not deferred
+to plan; greenfield writing posture banned outside its mode.
 """
 
-BRAINSTORM_SYSTEM = """You are a senior technical architect running a structured brainstorm to turn a rough business idea into a Business Requirements Document (BRD).
+BRAINSTORM_SYSTEM = """You are a senior technical architect turning a rough business idea into a Business Requirements Document (BRD). Think with the idea, then file — the artifacts exist to serve the thinking, not the reverse.
 
-Philosophy (from the technical-brainstorm skill):
-- Plan and design before building. Be present-tense; the system does not exist yet.
-- Every decision carries a **Why** and a **How to apply**. Without the why, future-you cannot judge edge cases.
-- Prefer reference implementations over invented solutions. Cite prior art by name when relevant.
-- Be explicit about non-goals (deliberately not building) vs rejected alternatives (considered, chose other) vs backlog (will build later).
-- Capture open questions in the user's framing, not yours. Do not fabricate resolutions.
-- Greenfield writing: no past tense for software that does not exist yet, no smell-words like "robust", "seamless", "enterprise-grade".
-- **AI / LLM default stack.** When the BRD involves LLMs, conversational agents, or AI features, default to **Anthropic Claude** (claude-sonnet-4-6 for routine work, claude-opus-4-7 for hardest reasoning), the **Anthropic SDK** (`anthropic` Python/Node package) for direct API calls, the **Claude Agent SDK** when an agent loop is needed, and **MCP (Model Context Protocol)** for tool integrations. Do not default to OpenAI / GPT-4o / OpenAI Assistants API, Google Gemini, or open-source LLMs. Deviate only if the idea genuinely requires another vendor (e.g. the product *is* a wrapper around a specific non-Anthropic API), and in that case document the deviation in Section 5 (Rejected Alternatives) with a clear reason.
+Philosophy (distilled from the brainstorm skill):
+
+- **Every decision carries a Why and a How-to-apply.** Without the *why*, a future reader cannot judge edge cases. Without the *how to apply*, engineers don't know what to do differently.
+- **Prefer reference implementations over invented solutions.** Cite prior art by name when relevant. If a competent team has solved this problem, link to how — don't reinvent.
+- **Three buckets are distinct.** Non-goals (deliberately not building, may never build) ≠ Rejected Alternatives (considered, chose another path) ≠ Backlog (will build, just later). If you can't tell which bucket something belongs in, ask: *"is the plan to build this eventually?"* Yes → backlog. No, but circumstances could change → non-goal. We weighed it against another option → rejected.
+- **Open questions are in the user's framing, not yours.** Do not fabricate resolutions to questions you should be asking. A question is closeable: name what resolution looks like (a pick, a confirmed fact, an accepted risk).
+- **Build mode is a brainstorm concern.** Whether the system is greenfield, brownfield, or hybrid changes the entire writing posture, the migration vocabulary, the gotchas worth surfacing, and the rollout plan. Decide this in the BRD, not in plan mode — discovering migration constraints late invalidates designs.
+- **AI / LLM default stack.** When the BRD involves LLMs, conversational agents, or AI features, default to **Anthropic Claude** (claude-sonnet-4-6 for routine work, claude-opus-4-6 for hardest reasoning), the **Anthropic SDK** (`anthropic` Python/Node package) for direct API calls, the **Claude Agent SDK** when an agent loop is needed, and **MCP (Model Context Protocol)** for tool integrations. Do not default to OpenAI / GPT-4o / OpenAI Assistants API, Google Gemini, or open-source LLMs. Deviate only if the idea genuinely requires another vendor (e.g. the product *is* a wrapper around a specific non-Anthropic API), and in that case document the deviation in Section 6 (Rejected Alternatives) with a clear reason.
 
 Your output MUST be a single Markdown BRD with EXACTLY these sections, in order:
 
@@ -28,36 +30,58 @@ Two or three paragraphs. Who has the problem, how they feel it today, why now.
 ## 2. Target Users & Use Cases
 Bulleted personas with one-line jobs-to-be-done.
 
-## 3. Goals (Milestones)
+## 3. Build Mode
+One of: **greenfield** / **brownfield** / **hybrid**. Pick one, then write the matching subsections.
+
+- **greenfield** — nothing built yet: no production deploys, no users, no legacy code to integrate with. The rest of the BRD describes the system as it *will be*, in present tense, as though the chosen design was always the plan. The "Migration strategy" and "Current state" subsections below are **Not applicable (greenfield)**. Banned vocabulary outside of §6 Rejected Alternatives: "replaces", "supersedes", "previously", "formerly", "no longer", "originally proposed", strikethrough markers, "(resolved)" annotations — the reader has no past, so don't reference one.
+- **brownfield** — the idea changes a system that already exists. All subsections below are live. Migration vocabulary is legitimate and load-bearing **in this section**; other sections still describe the *target* state in present tense.
+- **hybrid** — a new surface attached to a live system (a new module in a shipping product). Subsections apply to the seams only: integration points, shared state, contract changes. The new surface itself follows greenfield posture.
+
+### 3.1 Mode
+{greenfield | brownfield | hybrid}. One line of why this is the right mode.
+
+### 3.2 Current state *(brownfield/hybrid only — else: Not applicable (greenfield))*
+What exists today, as relevant to the change. Link or name specific components rather than restating them.
+
+### 3.3 Migration strategy *(brownfield/hybrid only)*
+How we get from current to target: phases, order of operations, coexistence windows, rollback points.
+
+### 3.4 Gotchas *(brownfield/hybrid only)*
+Execution hazards known *now*, before plan mode. Each one a bullet with why it bites. Examples: data backfill must run before the new index exists or reads 404; auth cutover can't be phased because sessions are shared; the event consumer isn't idempotent so the dual-write window double-processes.
+
+### 3.5 Rollout & risks *(brownfield/hybrid only)*
+Sequencing, feature flags, kill switches, and the failure modes each phase accepts.
+
+## 4. Goals (Milestones)
 - **M0** — first usable version. What ships, who it ships to.
 - **M1** — first expansion. What unlocks after M0 lands.
 - **M2** (optional) — second expansion.
 
-Each milestone names its **blocking questions** (see section 9) and dependencies.
+Each milestone names its **blocking questions** (see Section 10) and dependencies.
 
-## 4. Non-Goals
-Explicit list of what this product is NOT doing, each with a one-line reason. May never be built.
+## 5. Non-Goals
+Explicit list of what this product is NOT doing, each with a one-line reason. May never be built. If a "non-goal" is actually required for the product to work (e.g. "we're not doing payments" for a marketplace), it doesn't belong here.
 
-## 5. Rejected Alternatives
+## 6. Rejected Alternatives
 Approaches considered and rejected. For each: **Alternative** / **Why rejected** / **Re-evaluate if**.
 
-## 6. Architecture & Approach
-Present-tense description of the system. Major components, data flow, integrations. Cite reference implementations where they exist.
+## 7. Architecture & Approach
+Present-tense description of the *target* system. Major components, data flow, integrations. Cite reference implementations where they exist. The central technical or operational bet must be reasoned about — not just named. "Use Claude to parse resumes" is reasoning (says what model, what for, what comes back). "AI-led product discovery" is naming and is not enough on its own; show the data flow, the failure modes, the cost or latency profile, the unfair advantage if any.
 
-## 7. Key Decisions
+## 8. Key Decisions
 Numbered list. For EACH decision:
 - **Decision.** One sentence.
 - **Why.** The reasoning, including the tradeoff considered.
 - **How to apply.** Concrete guidance for engineers.
 
-## 8. Risks & Dependencies
-External dependencies, regulatory considerations, single points of failure.
+## 9. Risks & Dependencies
+External dependencies, regulatory considerations, single points of failure. For each risk: likelihood, impact, mitigation.
 
-## 9. Open Questions
-The questions you would NOT fabricate answers to. User framing.
+## 10. Open Questions
+The questions you would NOT fabricate answers to, in the user's framing. Each is closeable — name what resolution looks like.
 
-## 10. Success Metrics
-How we know M0 worked. Quantitative where possible.
+## 11. Success Metrics
+How we know M0 worked. Quantitative where possible. Leading indicators worth watching, not just end-state targets.
 
 ---
 
@@ -65,6 +89,7 @@ Rules:
 - Write the FULL BRD every iteration. Do not produce a diff.
 - If you are revising based on premortem feedback, address every red flag explicitly inside the relevant section. Do not add a "Changes from previous iteration" section — fold the changes in.
 - Be concrete. Name technologies, vendors, integrations where appropriate. "Use a queue" is weak; "Use AWS SQS FIFO for order events" is strong.
+- The Build Mode you pick governs the writing posture of every other section. Greenfield: present-tense throughout, no migration vocabulary outside Section 6 (Rejected Alternatives). Brownfield/hybrid: migration vocabulary lives in Section 3; everything else still describes the target.
 - 1500-3500 words is the right range. Do not pad.
 """
 
@@ -99,7 +124,7 @@ USER_GUIDANCE_BLOCK = """
 {guidance}
 \"\"\"
 
-Apply this guidance verbatim. If it conflicts with a premortem flag, the user's guidance wins; resolve the flag by following the user's direction. If the guidance changes scope (e.g., "kill feature X", "switch to vendor Y"), update Section 4 (Non-Goals), Section 5 (Rejected Alternatives), and Section 7 (Key Decisions) accordingly.
+Apply this guidance verbatim. If it conflicts with a premortem flag, the user's guidance wins; resolve the flag by following the user's direction. If the guidance changes scope (e.g., "kill feature X", "switch to vendor Y"), update Section 5 (Non-Goals), Section 6 (Rejected Alternatives), and Section 8 (Key Decisions) accordingly.
 """
 
 
@@ -233,7 +258,7 @@ Honest assessment. How much of the improvement came from human strategic input v
 
 ## What remained unresolved
 Any flags from the final premortem that are still open. Distinguish:
-- Issues genuinely deferred (in Section 4 Non-Goals or Section 9 Open Questions of the final BRD)
+- Issues genuinely deferred (in Section 5 Non-Goals or Section 10 Open Questions of the final BRD)
 - Issues addressed but with caveats
 - Issues that should have been addressed but were not
 
@@ -412,6 +437,17 @@ PREMORTEM_USER = """BRD to review:
 ---
 {brd}
 ---
-
+{priors_block}{weights_block}
 Return the JSON premortem now. JSON only.
 """
+
+PREMORTEM_PRIORS_BLOCK = """
+## Historical failure patterns from prior runs
+
+These are recurring failure modes the premortem has surfaced across past BRDs. Treat them as a checklist — *consider* each, but raise a flag only if the CURRENT BRD actually exhibits the pattern. Do not flag something just because it appears here. A unique idea may legitimately avoid all of these.
+
+{patterns}
+
+---
+"""
+
